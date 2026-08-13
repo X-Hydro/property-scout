@@ -1,12 +1,17 @@
 """
-Find abutters for every listing — ValueGap (Phase 1: abutter-finding + identification)
+Find abutters for every listing — ValueGap (Phase 1: find comparable candidates)
 
 For each active listing (Land or Single Family only -- condos/multi-family
 skipped per scope), resolves the listing to its own parcel using its
 lat/lon (supplied directly by RentCast -- point-in-polygon against GRANIT's
 boundaries), falling back to address matching only if the point doesn't
-land inside any parcel. Neighbors come from three rules, combined:
-  1. True geometric touching (always included, any distance/size/street)
+land inside any parcel, or discarding the match entirely if the resolved
+parcel's size is wildly implausible vs. the listing's own reported lotSize
+(catches cases like a brand-new subdivision lot resolving into the
+underlying multi-thousand-acre land tract because the actual small lot
+isn't in GRANIT yet). Neighbors come from three rules, combined:
+  1. True geometric touching (any distance/street -- but still subject to
+     the size/type filtering below, same as every other candidate)
   2. Within close_radius_m (default 100m) AND similar lot size to the
      target (default: within a 2.5x ratio) -- catches "purely adjacent by
      distance, different street name" cases, e.g. a parcel technically on
@@ -15,15 +20,32 @@ land inside any parcel. Neighbors come from three rules, combined:
      catches "same street, further down" cases without relying on
      house-number sequence (which broke down around gaps/condos/unusual
      numbering)
-Neighbors are included based on land_use_desc (the assessor's own
-plain-English property type -- ground truth), not address punctuation: we
-previously excluded anything with a '#' in its address on the theory that
-meant a condo unit, but that's unreliable -- some parcels use '#NNN' for a
-numbered land lot, not a unit (e.g. a parcel on Crooked Mtn Road, '#101',
-turned out to be Vacant Land, not a condo). Only genuinely blank addresses
-are excluded; everything else is included and tagged with land_use_desc
-and a comp_eligible flag (informational, not a filter) so Phase 2 or
-manual review can decide what's actually usable as a comp.
+
+This script's job is to find actual CANDIDATES -- not just anything nearby
+for a human to sift through. Every candidate from any of the three rules
+above is then filtered, uniformly:
+  - Lot size must be comparable to the target (same lot_size_similar()
+    check used above, applied here regardless of which rule found it --
+    geometric touching and the 250m same-street rule don't check size on
+    their own, so a 142-acre common-land parcel touching a 0.4-acre house
+    lot is discarded here even though it "touches")
+  - Type must not be a KNOWN non-comparable land_use_desc (Commercial,
+    Condo - No Land, Common Land, etc.). Unknown type (no VGSI match,
+    land_use_desc is None) is NOT discarded -- we learned the hard way
+    (the 'CROOKED MTN ROAD #101' case, which uses '#NNN' for a numbered
+    land lot, not a condo unit despite looking like one) that guessing
+    "probably not comparable" from incomplete data silently hides real
+    candidates. Unknown-type survivors are tagged comp_eligible: None
+    (unverified) rather than discarded, so you can still see and manually
+    check them.
+  - Blank address (nothing to identify the parcel by at all)
+
+Output still includes land_use_desc and total_market_value for every
+surviving candidate (for display/QC/styling), but this script does not
+compute anything with them -- no gap, no ranking, no median. That's
+compute_gap.py's job, which now also applies the same size/type filtering
+independently, since it doesn't assume find_abutters.py's output is
+pre-filtered by any particular version.
 
 Inputs (three -- lincoln_joined.geojson is used for land_use_desc AND
 total_market_value, i.e. both the assessor's plain-English property type
@@ -139,27 +161,61 @@ def build_address_index(raw_features: list[dict]) -> dict[str, dict]:
 def resolve_listing_to_parcel(listing: dict, address_index: dict, raw_features: list[dict]) -> tuple[dict | None, str]:
     """
     Returns (parcel_feature_or_None, method) where method is 'point_in_polygon',
-    'address', or 'unresolved'. Point-in-polygon is tried first -- the
-    listing's own lat/lon (supplied directly by RentCast, no separate
-    geocoding needed) is ground truth, more reliable than string-matching
-    address formatting quirks. Address matching is the fallback, for the
-    rare case a point falls just outside every polygon (small gaps/slivers
-    in parcel topology, or an imprecise listing coordinate).
+    'address', 'unresolved', or 'unresolved_suspect_parcel'. Point-in-polygon
+    is tried first -- the listing's own lat/lon (supplied directly by
+    RentCast, no separate geocoding needed) is ground truth, more reliable
+    than string-matching address formatting quirks. Address matching is the
+    fallback, for the rare case a point falls just outside every polygon.
+
+    If the point falls inside MULTIPLE parcels, prefer the smallest one --
+    non-overlapping parcels shouldn't both truly contain the same point, so
+    multiple matches signals messy/overlapping source geometry.
+
+    Sanity check: if the resolved parcel's acreage is wildly larger than the
+    listing's own reported lotSize, reject it and fall back to address
+    matching instead. This came up for real: a brand-new subdivision lot's
+    coordinate landed inside a ~64,000-acre parcel (the underlying land
+    tract's old boundary, labeled "KANCAMAGUS HIGHWAY") because GRANIT
+    hadn't yet been updated to reflect the actual small platted lot -- the
+    real lot polygon doesn't exist yet to match against. No resolution
+    logic can find a polygon that isn't there; the right move is to detect
+    and reject the bad match rather than silently return it.
     """
     lat, lon = listing.get("latitude"), listing.get("longitude")
+    lot_size_sqft = listing.get("lotSize")
+    expected_acres = (lot_size_sqft / 43560) if lot_size_sqft else None
+
+    def is_plausible_size(candidate_acres: float) -> bool:
+        if expected_acres is None:
+            # No stated lot size to check against -- fall back to an
+            # absolute cap. Even a large rural NH lot is rarely >200 acres;
+            # this only exists to catch town-spanning corridor parcels.
+            return candidate_acres <= 200
+        return candidate_acres <= max(expected_acres * 20, 5)
+
     if lat is not None and lon is not None:
         pt = Point(lon, lat)
-        for feat in raw_features:
-            poly = shape(feat["geometry"])
-            if poly.buffer(NEIGHBOR_BUFFER_DEG).contains(pt):
-                return feat, "point_in_polygon"
+        candidates = [feat for feat in raw_features if shape(feat["geometry"]).buffer(NEIGHBOR_BUFFER_DEG).contains(pt)]
+        if candidates:
+            smallest = min(candidates, key=lambda f: polygon_area_acres(f["geometry"]))
+            smallest_acres = polygon_area_acres(smallest["geometry"])
+            if is_plausible_size(smallest_acres):
+                return smallest, "point_in_polygon"
+            # Suspect match -- don't use it, but remember we had one so the
+            # caller can distinguish "no polygon contained the point" from
+            # "a polygon did, but it looked wrong" if address matching also fails.
+            suspect = True
+        else:
+            suspect = False
+    else:
+        suspect = False
 
     addr_key = normalize_address(listing.get("addressLine1", ""))
     parcel = address_index.get(addr_key)
     if parcel is not None:
         return parcel, "address"
 
-    return None, "unresolved"
+    return None, "unresolved_suspect_parcel" if suspect else "unresolved"
 
 
 def project_to_local_meters(geom, ref_lat: float):
@@ -301,6 +357,8 @@ def main():
     listing_count = 0
     neighbor_row_count = 0
     total_invalid_excluded = 0
+    total_size_mismatch_excluded = 0
+    total_type_mismatch_excluded = 0
     neighbors_missing_land_use = 0
 
     for listing in listings:
@@ -336,6 +394,7 @@ def main():
         # 2) The target parcel's own polygon (useful to see the subject
         # property's actual boundary, not just a dot)
         target_pid = str(parcel["properties"].get("PID", "")).strip()
+        target_acres = polygon_area_acres(parcel["geometry"])
         output_features.append({
             "type": "Feature",
             "geometry": parcel["geometry"],
@@ -348,7 +407,7 @@ def main():
                 "sluc": parcel["properties"].get("SLU"),
                 "land_use_desc": land_use_by_pid.get(target_pid),
                 "total_market_value": value_by_pid.get(target_pid),
-                "lot_acres": round(polygon_area_acres(parcel["geometry"]), 2),
+                "lot_acres": round(target_acres, 2),
             },
         })
 
@@ -382,9 +441,29 @@ def main():
             if not (addr or "").strip():
                 invalid_excluded += 1
                 continue
+
+            # Candidates, not just "nearby things" -- discard anything that
+            # fails size or (known) type comparability here, rather than
+            # deferring to compute_gap.py. find_abutters.py's job is to
+            # produce plausible comps, not everything within reach.
+            neighbor_acres = polygon_area_acres(n["geometry"])
+            if not lot_size_similar(target_acres, neighbor_acres, lot_size_ratio_tolerance):
+                total_size_mismatch_excluded += 1
+                continue
+
             land_use_desc = land_use_by_pid.get(pid)
+            # Discard a KNOWN non-comparable type (Commercial, Condo, Common
+            # Land, etc.). Keep unknown type (no VGSI match, land_use_desc
+            # is None) rather than guessing it's bad -- we already learned
+            # the hard way (the 'CROOKED MTN ROAD #101' case) that assuming
+            # "probably not comparable" from incomplete data silently hides
+            # real candidates. Unknown stays in, tagged as unverified.
+            if land_use_desc is not None and land_use_desc not in COMP_ELIGIBLE_LAND_USE:
+                total_type_mismatch_excluded += 1
+                continue
             if land_use_desc is None:
                 neighbors_missing_land_use += 1
+
             output_features.append({
                 "type": "Feature",
                 "geometry": n["geometry"],
@@ -396,25 +475,30 @@ def main():
                     "address": addr,
                     "sluc": n["properties"].get("SLU"),
                     "land_use_desc": land_use_desc,
-                    # Informational, not a filter -- None means "unknown,
-                    # no VGSI match" rather than "not eligible". A parcel we
-                    # have no data on shouldn't be silently dropped just
-                    # because we can't confirm its type.
-                    "comp_eligible": (land_use_desc in COMP_ELIGIBLE_LAND_USE) if land_use_desc else None,
+                    # True (known comparable type) or None (unverified --
+                    # no VGSI match, kept because size already checked out
+                    # and we can't confirm it's actually bad). Never False
+                    # here anymore -- a known-bad type is discarded above,
+                    # not just tagged.
+                    "comp_eligible": True if land_use_desc in COMP_ELIGIBLE_LAND_USE else None,
                     "has_unit_style_address": "#" in addr,
                     "total_market_value": value_by_pid.get(pid),
-                    "lot_acres": round(polygon_area_acres(n["geometry"]), 2),
+                    "lot_acres": round(neighbor_acres, 2),
                     "found_via": "+".join(sorted(neighbor_methods[pid])),
                 },
             })
             neighbor_row_count += 1
 
             # QC linestring: listing's own coordinate -> this neighbor's
-            # centroid. Purely visual -- makes it obvious at a glance in a
-            # map viewer whether a neighbor is genuinely nearby or whether
-            # the distance rules reached further than expected (a long line
-            # to something that doesn't look adjacent is an instant red
-            # flag during manual review).
+            # centroid. We'd switched this to nearest-boundary-point earlier
+            # to fix multi-km lines to huge parcels (a highway corridor, a
+            # 142-acre common-land parcel) -- but the real cause of those
+            # was bad target resolution and un-filtered outlier neighbors,
+            # both fixed upstream since (the lotSize sanity check on
+            # resolve_listing_to_parcel, and the size/type discard rules
+            # above). With those gone, every surviving candidate is already
+            # comparable in size to the target, so its centroid is a
+            # reasonably close, visually cleaner point than a boundary edge.
             neighbor_centroid = shape(n["geometry"]).centroid
             output_features.append({
                 "type": "Feature",
@@ -487,6 +571,8 @@ def main():
     print(f"Neighbor rules: geometric touching (always) + within {close_radius_m:.0f}m with similar lot size "
           f"(<= {lot_size_ratio_tolerance}x ratio) + within {far_radius_m:.0f}m on the same street")
     print(f"Neighbors excluded (blank address -- nothing to identify by): {total_invalid_excluded}")
+    print(f"Neighbors excluded (lot size not comparable): {total_size_mismatch_excluded}")
+    print(f"Neighbors excluded (known non-comparable type): {total_type_mismatch_excluded}")
     print(f"Neighbors with no VGSI land_use_desc match: {neighbors_missing_land_use}")
     print(f"Features written: {len(output_features)} total "
           f"({listing_count} listing points + {listing_count} target parcels + "
