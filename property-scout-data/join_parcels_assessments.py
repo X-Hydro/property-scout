@@ -54,23 +54,38 @@ def normalize_address(raw: str) -> str:
 
 def normalize_granit_id(raw: str):
     """
-    GRANIT's 'PID' field is a packed Map-Block-Lot-Unit ID, e.g.
-    '127-268000-00' -> Map=127, Block=268, Lot=000, Unit=00 (the middle
-    6-digit chunk is Block+Lot concatenated). Note: the cleaner-looking
-    'DisplayId' field ('127-268-000-000') was tried instead but performed
-    worse (66.4% vs 73.2% match rate) -- its hyphen segments don't align
-    consistently with VGSI's Map/Block/Lot/Unit structure for condo and
-    mobile-home-park sub-lots, where the "lot" position sometimes holds a
-    unit code instead. Since those parcel types get filtered out of the
-    single-family comparison set anyway, this simpler packed-PID parser is
-    good enough for the parcels that actually matter here.
+    GRANIT's 'PID' field format varies BY TOWN -- this was discovered when
+    Lincoln's town-specific packed format (see below) produced 0 MBLU
+    matches on Lebanon, silently falling through to address-only matching
+    for the whole town. Two known formats so far:
+      - Lincoln-style (hyphen-separated, packed): '127-268000-00' ->
+        Map=127, Block=268, Lot=000 (middle 6-digit chunk is Block+Lot
+        concatenated with no separator between them)
+      - Lebanon-style (space-separated, already distinct fields):
+        '0106 0032 00000' -> Map=0106, Block=0032, Lot=00000 (block and
+        lot are already separate tokens, no packing)
+    Distinguished by extracting all digit-groups regardless of separator,
+    then checking the middle group's length: 6 digits means packed
+    (Lincoln-style, split 3+3); any other length means already-separated
+    (Lebanon-style, used as-is). This is inferred from exactly two towns
+    -- if a third town's format doesn't fit either pattern, this will
+    return None (unparseable) rather than guess wrong, and will need a
+    new case added here once that shape is seen.
     Returns a (map, block, lot) tuple with leading zeros stripped per
     component, or None if unparseable.
     """
-    m = re.match(r"^(\d+)-(\d{3})(\d{3})-(\w+)$", raw.strip())
-    if not m:
+    groups = re.findall(r"\d+", raw.strip())
+    if len(groups) < 3:
         return None
-    map_, block, lot, _unit = m.groups()
+
+    map_, second, third = groups[0], groups[1], groups[2]
+    if len(second) == 6:
+        # Packed Lincoln-style: second group is Block+Lot concatenated
+        block, lot = second[:3], second[3:]
+    else:
+        # Already-separated Lebanon-style
+        block, lot = second, third
+
     return (map_.lstrip("0") or "0", block.lstrip("0") or "0", lot.lstrip("0") or "0")
 
 

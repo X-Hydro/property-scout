@@ -14,7 +14,7 @@ parsed output to the live page before trusting a full crawl -- the regexes
 below may need small adjustments once you see the actual HTML.
 
 Usage:
-    python vgsi_assessment_scraper.py lincolnnh 1 5000 lincoln_assessments.csv
+    python vgsi_assessment_scraper.py lincolnnh 1 3000 lincoln_assessments.csv
 """
 
 import sys
@@ -26,6 +26,82 @@ from bs4 import BeautifulSoup
 
 BASE = "https://gis.vgsi.com/{town}/Parcel.aspx?Pid={pid}"
 HEADERS = {"User-Agent": "ValueGap research tool (personal project, low volume)"}
+
+# Different towns' VGSI installs use different vocabulary for the same
+# underlying property-type concept -- discovered when Lebanon's raw values
+# ('ONE FAM', 'RES LAND', '2 FAMILY') turned out to share nothing in common
+# with Lincoln's ('Single Family', 'Vacant Land', 'Two Family'), silently
+# breaking every type-eligibility check downstream in find_abutters.py and
+# compute_gap.py, since those are hardcoded to specific strings. Standardized
+# HERE, at scrape time -- the earliest point land_use_desc exists at all
+# (GRANIT never has this field, only numeric SLU/SLUC codes) -- so every
+# downstream file, and the raw CSV itself, only ever sees canonical values.
+#
+# Built from exactly two towns' data so far -- if a third town introduces
+# a new raw value not listed here, it's left UNCHANGED (not guessed at)
+# and will behave as an "unrecognized type" downstream (kept as a
+# candidate, not counted as a value comp) until someone adds it below.
+LAND_USE_STANDARDIZATION = {
+    # Lincoln, NH
+    "single family": "Single Family",
+    "two family": "Two Family",
+    "vacant land": "Vacant Land",
+    "vacant - pot dev": "Vacant Land",
+    "vacant": "Vacant Land",
+    "condo - no land": "Condo",
+    "common land": "Common Land",
+    "mobile home": "Mobile Home",
+    "commercial": "Commercial",
+    "store/shop": "Commercial",
+    "office bld": "Commercial",
+    "motels": "Commercial",
+    "town - comm": "Municipal",
+    "vac w/ ob": "Vacant Land with Outbuilding",
+    "res  pud": "Residential PUD",
+    # Lebanon, NH
+    "one fam": "Single Family",
+    "one fam w acc": "Single Family",
+    "2 family": "Two Family",
+    "3 family": "Three Family",
+    "res land": "Vacant Land",
+    "condo": "Condo",
+    "condo-vac": "Condo",
+    "municpal": "Municipal",  # sic -- this is VGSI's own spelling, missing the "I"
+    "municpal-comm": "Municipal",
+    "state nh": "Municipal",
+    "charitable": "Municipal",
+    "potnldev": "Vacant Land",
+    "undev": "Vacant Land",
+    "dev land": "Vacant Land",
+    "day care": "Commercial",
+    "medical off-res": "Commercial",
+    "office": "Commercial",
+    "store": "Commercial",
+    "commwhse": "Commercial",
+    "condo-com": "Commercial",
+    "rest/bar": "Commercial",
+    "condo ind": "Commercial",
+    "mobil hm": "Mobile Home",
+    "camper": "Camper",
+    "apt 4-8": "Multi-Family",
+    "apt 9+up": "Multi-Family",
+    "mult hs": "Multi-Family",
+    "pud": "Residential PUD",
+    "open space": "Open Space",
+    "out blds": "Vacant Land with Outbuilding",
+    "other rec": "Recreational",
+    "farm rec": "Recreational",
+    "farm": "Farm",
+    # "other" deliberately NOT mapped -- too ambiguous to guess a category
+    # for; left as raw text, which behaves as "unrecognized" downstream.
+}
+
+
+def standardize_land_use(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    key = raw.strip().lower()
+    return LAND_USE_STANDARDIZATION.get(key, raw)  # unrecognized -> left as-is, not guessed at
 
 
 def parse_parcel(html: str) -> dict | None:
@@ -60,7 +136,7 @@ def parse_parcel(html: str) -> dict | None:
     if len(land_use_section) > 1:
         desc_m = re.search(r"Description\s*\n+\s*(.+?)\s*\n", land_use_section[1])
         if desc_m:
-            land_use_desc = desc_m.group(1).strip()
+            land_use_desc = standardize_land_use(desc_m.group(1).strip())
     return {
         "location": location_m.group(1).strip() if location_m else None,
         "total_market_value": grab("Total Market Value"),

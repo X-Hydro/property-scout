@@ -88,6 +88,8 @@ def compute_gap_for_listing(
     if parcel is None:
         return {"listing": listing, "error": "unresolved", "resolve_method": method}
 
+    target_pid = str(parcel["properties"].get("PID", "")).strip()
+    target_assessed_value = value_by_pid.get(target_pid)
     target_acres = polygon_area_acres(parcel["geometry"])
     target_is_land = listing.get("propertyType") == "Land"
 
@@ -129,7 +131,8 @@ def compute_gap_for_listing(
     if not comps:
         return {
             "listing": listing, "error": "no_comps", "resolve_method": method,
-            "target_acres": target_acres, "candidates": candidates,
+            "target_acres": target_acres, "target_assessed_value": target_assessed_value,
+            "candidates": candidates,
         }
 
     comps.sort()
@@ -142,6 +145,7 @@ def compute_gap_for_listing(
     return {
         "listing": listing, "error": None, "resolve_method": method,
         "target_acres": target_acres, "target_is_land": target_is_land,
+        "target_assessed_value": target_assessed_value,
         "candidates": candidates, "comps": comps, "comp_count": n_comps,
         "comp_median": median, "comp_min": min(comps), "comp_max": max(comps),
         "price": price, "gap": gap, "gap_pct": pct,
@@ -153,7 +157,9 @@ def print_report(result: dict):
     listing = result["listing"]
     print(f"Listing: {listing.get('addressLine1')} | ${listing.get('price'):,} | "
           f"{listing.get('propertyType')} | {listing.get('squareFootage')} sqft | "
-          f"resolved via {result.get('resolve_method')}")
+          f"built {listing.get('yearBuilt', 'unknown')} | resolved via {result.get('resolve_method')}")
+    tav = result.get("target_assessed_value")
+    print(f"Target's own assessed value: {'$' + format(tav, ',.0f') if tav else 'no VGSI match'}")
     print()
 
     if result["error"] == "unresolved":
@@ -215,6 +221,9 @@ def run_rank_mode(raw_features, joined_features, listings, out_path):
         else:
             ranked.append({
                 "address": listing.get("addressLine1"), "property_type": listing.get("propertyType"),
+                "year_built": listing.get("yearBuilt"),
+                "target_assessed_value": result.get("target_assessed_value"),
+                "recent_sale_price": None,  # placeholder -- no reliable recent-sales source yet, see valuegap notes
                 "price": result["price"], "comp_median": result["comp_median"],
                 "comp_count": result["comp_count"], "comp_min": result["comp_min"],
                 "comp_max": result["comp_max"], "gap": result["gap"], "gap_pct": result["gap_pct"],
@@ -223,10 +232,32 @@ def run_rank_mode(raw_features, joined_features, listings, out_path):
     land_ranked = sorted((r for r in ranked if r["property_type"] == "Land"), key=lambda r: r["gap"], reverse=True)
     sfh_ranked = sorted((r for r in ranked if r["property_type"] == "Single Family"), key=lambda r: r["gap"], reverse=True)
 
+    def add_relative_gap(rows: list[dict]):
+        """
+        relative_gap_pct = this listing's gap_pct minus its group's own
+        median gap_pct. If most listings in a group cluster around the
+        same gap (e.g. -47%, consistent with town-wide appreciation since
+        the last revaluation rather than any individual mispricing), this
+        cancels that shared baseline out and shows how far a listing
+        deviates from its peers -- a more specific signal than raw gap%,
+        which mixes "this whole town's assessments are behind the market"
+        with "this specific house is unusual" into one number.
+        """
+        if not rows:
+            return
+        pcts = sorted(r["gap_pct"] for r in rows)
+        n = len(pcts)
+        group_median = pcts[n // 2] if n % 2 else (pcts[n // 2 - 1] + pcts[n // 2]) / 2
+        for r in rows:
+            r["relative_gap_pct"] = r["gap_pct"] - group_median
+
+    add_relative_gap(land_ranked)
+    add_relative_gap(sfh_ranked)
+
     with open(out_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=[
-            "address", "property_type", "price", "comp_median", "comp_count",
-            "comp_min", "comp_max", "gap", "gap_pct",
+            "address", "property_type", "year_built", "target_assessed_value", "recent_sale_price",
+            "price", "comp_median", "comp_count", "comp_min", "comp_max", "gap", "gap_pct", "relative_gap_pct",
         ])
         writer.writeheader()
         writer.writerows(land_ranked)   # Land block first, each independently sorted
@@ -242,16 +273,21 @@ def run_rank_mode(raw_features, joined_features, listings, out_path):
         print(f"  {a}")
     print()
     print(f"Wrote {out_path} -- Land and Single Family each sorted largest gap to smallest, Land block first")
+    print("relative_gap_pct = this listing's gap% minus its group's own median gap% -- cancels out "
+          "town-wide effects (e.g. broad appreciation since the last revaluation) to highlight genuine outliers")
 
     def print_section(title, rows):
         print()
         print(f"=== {title} ({len(rows)}) ===")
-        print(f"{'Address':<28} {'Price':>12} {'CompMedian':>12} {'Comps':>6} {'Gap':>12} {'Gap%':>8}")
-        print("-" * 90)
+        print(f"{'Address':<28} {'Built':>6} {'TargetVal':>11} {'Price':>12} {'CompMedian':>12} {'Comps':>6} {'Gap':>12} {'Gap%':>8} {'RelGap%':>8}")
+        print("-" * 120)
         for r in rows[:15]:
-            print(f"{r['address']:<28} ${r['price']:>10,.0f} "
+            built = r["year_built"] if r["year_built"] else "?"
+            tav = f"${r['target_assessed_value']:,.0f}" if r["target_assessed_value"] else "no match"
+            new_flag = "  <- CHECK: newer construction, assessment may lag" if (r["year_built"] and r["year_built"] >= 2020) else ""
+            print(f"{r['address']:<28} {built:>6} {tav:>11} ${r['price']:>10,.0f} "
                   f"${r['comp_median']:>10,.0f} {r['comp_count']:>6} "
-                  f"${r['gap']:>10,.0f} {r['gap_pct']:>7.1f}%")
+                  f"${r['gap']:>10,.0f} {r['gap_pct']:>7.1f}% {r['relative_gap_pct']:>7.1f}%{new_flag}")
         if len(rows) > 15:
             print(f"... and {len(rows) - 15} more in {out_path}")
 
