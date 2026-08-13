@@ -28,7 +28,14 @@ above is then filtered, uniformly:
     check used above, applied here regardless of which rule found it --
     geometric touching and the 250m same-street rule don't check size on
     their own, so a 142-acre common-land parcel touching a 0.4-acre house
-    lot is discarded here even though it "touches")
+    lot is discarded here even though it "touches") -- EXCEPT when the
+    target listing itself is Land: a land listing's own acreage isn't
+    what matters for comparability, since the question is what the
+    neighborhood supports (nearby built homes), not lot-size symmetry.
+    A 1.11-acre vacant lot next to 0.35-acre built homes on the same
+    small circle is genuinely comparable by proximity even though it
+    fails a strict size ratio -- the size check is skipped for Land
+    targets specifically, kept for Single Family targets.
   - Type must not be a KNOWN non-comparable land_use_desc (Commercial,
     Condo - No Land, Common Land, etc.). Unknown type (no VGSI match,
     land_use_desc is None) is NOT discarded -- we learned the hard way
@@ -91,12 +98,23 @@ ALLOWED_PROPERTY_TYPES = {"Single Family", "Land"}
 NEIGHBOR_BUFFER_DEG = 0.00005  # ~5m tolerance for boundary slivers/gaps
 SQM_PER_ACRE = 4046.8564224
 
-# Which VGSI land_use_desc values count as a valid comp: an existing
-# single-family home, or a lot capable of holding one. Informational tag
-# only (see comp_eligible below) -- not used to exclude anything, since a
-# wrong guess here would silently hide real candidates. Extend this set if
-# more towns' data surfaces other land-use labels that should qualify.
+# Which VGSI land_use_desc values count as a valid CANDIDATE worth showing
+# (find_abutters.py's job -- is this neighbor comparable enough to include
+# at all). Informational tag only here (see comp_eligible below) -- not
+# used to exclude anything, since a wrong guess here would silently hide
+# real candidates. Extend this set if more towns' data surfaces other
+# land-use labels that should qualify.
 COMP_ELIGIBLE_LAND_USE = {"Single Family", "Vacant Land", "Vacant - Pot Dev"}
+
+# Which VGSI land_use_desc values count as a real VALUE COMP -- i.e. belong
+# in a median calculation (compute_gap.py's job). Narrower than the set
+# above on purpose: land and finished homes are fundamentally different
+# value classes, so pooling a $165K vacant lot with $1.5M built homes into
+# one median doesn't make sense even though both are legitimate neighbors
+# worth showing. A target's value -- whether it's a house being priced, or
+# land being evaluated for development upside -- should be measured
+# against real built-home values, never against land prices.
+VALUE_COMP_LAND_USE = {"Single Family"}
 
 
 def polygon_area_acres(geom) -> float:
@@ -446,8 +464,19 @@ def main():
             # fails size or (known) type comparability here, rather than
             # deferring to compute_gap.py. find_abutters.py's job is to
             # produce plausible comps, not everything within reach.
+            #
+            # Size check is skipped for Land targets: a land listing's own
+            # acreage isn't really what matters for comparability -- the
+            # question is what the neighborhood supports (nearby built
+            # homes), not whether the raw lot size matches. Requiring
+            # symmetry wrongly excluded genuinely close comps (e.g. a
+            # 1.11-acre land listing next to 0.35-acre built homes on the
+            # same small circle -- clearly comparable by proximity, but
+            # failed a strict size ratio). Still applies for Single Family
+            # targets, where house-to-house size comparability matters.
+            target_is_land = listing.get("propertyType") == "Land"
             neighbor_acres = polygon_area_acres(n["geometry"])
-            if not lot_size_similar(target_acres, neighbor_acres, lot_size_ratio_tolerance):
+            if not target_is_land and not lot_size_similar(target_acres, neighbor_acres, lot_size_ratio_tolerance):
                 total_size_mismatch_excluded += 1
                 continue
 
