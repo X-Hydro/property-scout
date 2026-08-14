@@ -100,11 +100,15 @@ SQM_PER_ACRE = 4046.8564224
 
 # Which VGSI land_use_desc values count as a valid CANDIDATE worth showing
 # (find_abutters.py's job -- is this neighbor comparable enough to include
-# at all). Informational tag only here (see comp_eligible below) -- not
-# used to exclude anything, since a wrong guess here would silently hide
-# real candidates. Extend this set if more towns' data surfaces other
-# land-use labels that should qualify.
-COMP_ELIGIBLE_LAND_USE = {"Single Family", "Vacant Land", "Vacant - Pot Dev"}
+# at all). These are the CANONICAL (standardized) values produced by
+# join_parcels_assessments.py's standardize_land_use() -- not raw
+# town-specific strings, since those vary (Lincoln: "Vacant Land";
+# Lebanon: "RES LAND" -> standardized to the same canonical value).
+# Informational tag only here (see comp_eligible below) -- not used to
+# exclude anything, since a wrong guess here would silently hide real
+# candidates. Extend LAND_USE_STANDARDIZATION in join_parcels_assessments.py
+# (not this set) when a new town surfaces an unrecognized raw label.
+COMP_ELIGIBLE_LAND_USE = {"Single Family", "Vacant Land"}
 
 # Which VGSI land_use_desc values count as a real VALUE COMP -- i.e. belong
 # in a median calculation (compute_gap.py's job). Narrower than the set
@@ -404,6 +408,8 @@ def main():
                 "listing_address": listing.get("addressLine1"),
                 "listing_type": listing.get("propertyType"),
                 "listing_price": listing.get("price"),
+                "listing_sqft": listing.get("squareFootage"),
+                "listing_year_built": listing.get("yearBuilt"),
                 "listing_resolve_method": method,
                 "listing_mls_number": listing.get("mlsNumber"),
             },
