@@ -26,6 +26,7 @@ Usage:
     python run_ingest.py --state nh --towns Lincoln --pid-end 20000 --out data/
     python run_ingest.py --state ma --towns Andover --out data/
     python run_ingest.py --state ct nh --towns Bristol Lincoln --out data/
+    python run_ingest.py --state ma --all-towns --out ma_data
 """
 
 import argparse
@@ -77,8 +78,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--state", nargs="+", required=True,
                          help="one or more state keys to run")
-    parser.add_argument("--towns", nargs="+", required=True,
-                         help="town/municipality names, applied to every selected state")
+    towns_group = parser.add_mutually_exclusive_group(required=True)
+    towns_group.add_argument("--towns", nargs="+",
+                              help="town/municipality names, applied to every selected state")
+    towns_group.add_argument("--all-towns", action="store_true",
+                              help="run every municipality the spider's own source knows about "
+                                   "(requires the spider to implement list_towns() -- CT and MA "
+                                   "do; NH does not yet)")
     parser.add_argument("--out", default="data")
     parser.add_argument("--pid-end", type=int, default=20000, help="NH only")
     parser.add_argument("--town-slug", help="NH only, single-town VGSI slug override")
@@ -96,7 +102,19 @@ def main():
             sys.exit(1)
 
         spider = _build_spider(state_key, args)
-        summary = spider.run(args.towns, args.out)
+
+        if args.all_towns:
+            if not hasattr(spider, "list_towns"):
+                print(f"ERROR: '{state_key}' spider doesn't implement list_towns() yet -- "
+                      f"pass --towns explicitly instead.")
+                sys.exit(1)
+            print(f"[{state_key}] discovering full town list...")
+            towns = spider.list_towns()
+            print(f"[{state_key}] {len(towns)} municipalities found, running all of them")
+        else:
+            towns = args.towns
+
+        summary = spider.run(towns, args.out)
         overall_summary[state_key] = summary
 
     print("\n" + "=" * 60)

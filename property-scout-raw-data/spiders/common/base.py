@@ -169,12 +169,26 @@ class StateSpider(ABC):
         <out_dir>/<state_code>_<town_slug>.geojson. Prints a per-town row
         count -- a silent zero-row town is exactly the AuctionScout
         Sullivan-spider failure mode this is meant to catch early.
+
+        A single town's failure (after retries) does NOT abort the rest
+        of the run -- logged and skipped instead. Matters once running
+        many towns unattended (e.g. every CT/MA municipality): every
+        town before the failure already succeeded and was written to
+        disk, so crashing the whole run over one bad town would throw
+        away real, already-fetched progress for no reason. Failed towns
+        are reported in a final summary so they're not silently missed.
         """
         out_dir_path = Path(out_dir)
         summary = []
+        failed_towns = []
         for town in towns:
             print(f"[{self.state_code}] fetching {town}...")
-            records = self._retry(self.fetch_town, town)
+            try:
+                records = self._retry(self.fetch_town, town)
+            except SpiderError as e:
+                print(f"  FAILED: {town}: {e}")
+                failed_towns.append((town, str(e)))
+                continue
             self._validate_records(records, town)
             town_slug = town.lower().replace(" ", "_")
             out_path = out_dir_path / f"{self.state_code.lower()}_{town_slug}.geojson"
@@ -186,4 +200,8 @@ class StateSpider(ABC):
         if zero_row_towns:
             print(f"WARNING: zero records for: {zero_row_towns} -- "
                   f"likely a broken query/URL, not genuinely empty towns")
+        if failed_towns:
+            print(f"WARNING: {len(failed_towns)} town(s) failed and were skipped:")
+            for town, err in failed_towns:
+                print(f"  {town}: {err}")
         return summary

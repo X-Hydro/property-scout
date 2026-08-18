@@ -176,6 +176,30 @@ class CTSpider(StateSpider):
     def __init__(self):
         self._schema_diagnostic_printed = False
 
+    def list_towns(self) -> list[str]:
+        """
+        Queries the service's own distinct Town_Name values instead of
+        needing a hardcoded 169-town list -- self-updating if CT ever
+        adds/renames a town, and avoids maintaining a separate static
+        list that could drift out of sync with the real data.
+        """
+        params = {
+            "where": "1=1",
+            "outFields": "Town_Name",
+            "returnDistinctValues": "true",
+            "returnGeometry": "false",
+            "f": "json",
+        }
+        url = f"{BASE_QUERY_URL}?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(url, headers={"User-Agent": "PropertyValuesDB research tool"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+        if "error" in data:
+            raise SpiderError(f"ArcGIS list_towns query error: {data['error']}")
+        towns = sorted({f["attributes"]["Town_Name"] for f in data.get("features", [])
+                         if f["attributes"].get("Town_Name")})
+        return towns
+
     def _query_page(self, town: str, offset: int) -> dict:
         # Real field name confirmed via layer metadata's "Display Field:
         # Town_Name" -- the prose docs' "Town Name" (with a space) is a
