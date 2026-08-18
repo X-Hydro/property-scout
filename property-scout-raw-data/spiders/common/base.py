@@ -66,6 +66,19 @@ class SpiderError(Exception):
     """Raised for a fetch failure that retries couldn't resolve."""
 
 
+class FatalSpiderError(SpiderError):
+    """
+    Raised for a config/usage problem that retrying can never fix --
+    a missing required argument, a wrong-layer input file, an unpermitted
+    stub spider, etc. _retry() re-raises these immediately instead of
+    retrying, unlike a real transient failure (timeout, connection
+    error). Found via real usage: MASpider's "you forgot --geojson"
+    error was retrying 3 times with growing backoff before finally
+    failing, which is actively misleading -- it implies the problem
+    might resolve on its own, when it never will.
+    """
+
+
 class StateSpider(ABC):
     """Subclass per state. Must set state_code and implement fetch_town()."""
 
@@ -100,12 +113,16 @@ class StateSpider(ABC):
         raise NotImplementedError
 
     def _retry(self, fn, *args, **kwargs):
-        """Call fn with retries on transient failure. Re-raises the last
+        """Call fn with retries on transient failure. FatalSpiderError
+        skips retries entirely and re-raises immediately, since retrying
+        a config/usage problem can never succeed. Re-raises the last
         exception (wrapped in SpiderError) if every attempt fails."""
         last_exc = None
         for attempt in range(1, self.max_retries + 1):
             try:
                 return fn(*args, **kwargs)
+            except FatalSpiderError:
+                raise  # never retry -- see FatalSpiderError's docstring
             except Exception as e:  # noqa: BLE001 -- deliberately broad, retry layer
                 last_exc = e
                 if attempt < self.max_retries:

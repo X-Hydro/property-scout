@@ -55,7 +55,7 @@ from datetime import date, datetime, timezone
 import urllib.request
 import urllib.parse
 
-from .base import StateSpider, SpiderError
+from ..common.base import StateSpider, SpiderError
 
 BASE_QUERY_URL = (
     "https://services3.arcgis.com/3FL1kr7L4LvwA2Kb/arcgis/rest/services/"
@@ -134,6 +134,42 @@ def _combined_bathrooms(attrs: dict):
     return (full or 0) + 0.5 * (half or 0)
 
 
+def _dedupe_property_ids(records: list[dict], town: str) -> list[dict]:
+    """
+    Parcel_ID is NOT always a real unique identifier -- CT uses shared
+    placeholder text ("MISMATCH", blank) for parcels whose CAMA link
+    failed, confirmed via real data (39 "CT:MISMATCH" rows, 16 blank, in
+    one town alone). Silently keying on these would merge many different
+    physical parcels into one DB row and lose the rest -- and even a
+    genuine one-off duplicate breaks a batched Postgres upsert entirely
+    (ON CONFLICT DO UPDATE can't affect the same row twice in one
+    statement). Fix: any property_id seen more than once gets OBJECTID
+    (CT's own guaranteed-unique internal row id) appended, so every
+    record survives with a real distinct key, and the original
+    (possibly-junk) id stays visible for debugging rather than hidden.
+    """
+    seen_counts: dict[str, int] = {}
+    for r in records:
+        pid = r["property_id"]
+        seen_counts[pid] = seen_counts.get(pid, 0) + 1
+
+    duplicated_ids = {pid for pid, n in seen_counts.items() if n > 1 and pid is not None}
+    if duplicated_ids:
+        print(f"  {town}: {len(duplicated_ids)} property_id value(s) were not unique "
+              f"({sum(seen_counts[p] for p in duplicated_ids)} affected records) -- "
+              f"disambiguated with OBJECTID, sample: {sorted(duplicated_ids)[:5]}")
+
+    seen_so_far: set[str] = set()
+    for r in records:
+        pid = r["property_id"]
+        if pid in duplicated_ids:
+            oid = r.pop("_objectid", None)
+            r["property_id"] = f"{pid}#OBJECTID{oid}" if oid else f"{pid}#{id(r)}"
+        else:
+            r.pop("_objectid", None)
+    return records
+
+
 class CTSpider(StateSpider):
     state_code = "CT"
 
@@ -186,6 +222,7 @@ class CTSpider(StateSpider):
         parcel_id = attrs.get("Parcel_ID")
         record = {
             "property_id": f"CT:{parcel_id}" if parcel_id else None,
+            "_objectid": attrs.get("OBJECTID"),  # internal use only -- for de-duping, stripped before output
             "state": "CT",
             "county": None,  # Planning_Region is available but not the same concept -- see docstring
             "municipality": attrs.get("Town_Name") or town,
@@ -233,7 +270,7 @@ class CTSpider(StateSpider):
             if len(features) < PAGE_SIZE:
                 break
             offset += PAGE_SIZE
-        return records
+        return _dedupe_property_ids(records, town)
 
 
 def main():

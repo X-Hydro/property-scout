@@ -1,34 +1,24 @@
 """
 New Hampshire spider — Property Values Database
 
-Unlike CT (one clean REST API call), NH's data comes from the pipeline
-already built and debugged over the ValueGap sessions: GRANIT (parcel
-geometry + StreetAddress) + VGSI (assessed value, scraped town-by-town,
-sequential + targeted-address-lookup passes) joined on a collision-safe
-MBLU key. This spider does NOT reimplement any of that -- it imports and
-calls the real, already-fixed functions directly:
-  - vgsi_assessment_scraper.scrape_town()  (Pass 1 sequential + Pass 2
-    targeted-address-lookup fallback, both already debugged)
+Unlike CT (one clean REST API call), NH's data comes from TWO real
+sources, both now called directly -- no subprocess, no unverified CLI
+guessing:
+  - granit_parcel_downloader.fetch_town_parcels()  (parcel geometry +
+    StreetAddress, direct ArcGIS REST query -- same pattern as
+    ct_spider.py querying CT's API directly)
+  - vgsi_assessment_scraper.scrape_town()  (assessed value, Pass 1
+    sequential + Pass 2 targeted-address-lookup fallback)
   - join_parcels_assessments.join()         (collision-safe 4-component
     MBLU key -- the condo-unit-collision fix)
-and only adds a final step: read the joined GeoJSON and remap its
-fields into COMMON_SCHEMA_FIELDS.
+This spider does not reimplement any of that -- it imports and calls the
+real, already-fixed functions, and only adds a final step: read the
+joined GeoJSON and remap its fields into COMMON_SCHEMA_FIELDS.
 
-REQUIRES: vgsi_assessment_scraper.py, vgsi_targeted_lookup.py, and
-join_parcels_assessments.py (the fixed versions) importable -- this
-adds their directory to sys.path, so keep them together with this file's
-parent or edit PIPELINE_DIR below to point at wherever your NH scripts
-actually live.
-
-NOT WRAPPED (no source available for this one): granit_parcel_downloader.py.
-Called via subprocess using its documented CLI convention
-(`python granit_parcel_downloader.py <TOWN>` -> `<town>_nh.geojson`) --
-UNVERIFIED against its actual argument format since its source was never
-shared in this conversation. If a town name needs different formatting
-than a plain string, this will need adjusting. You can also skip this
-step entirely and pass an already-downloaded geojson via
---granit-geojson, which every town so far in this project has used
-anyway (Lincoln, Lebanon).
+REQUIRES: granit_parcel_downloader.py, vgsi_assessment_scraper.py,
+vgsi_targeted_lookup.py, and join_parcels_assessments.py importable --
+this adds their directory to sys.path, so keep them together with this
+file's parent, or edit PIPELINE_DIR below.
 
 IMPORTANT FIELD-COVERAGE GAP vs. CT: the current VGSI scraper only
 parses Total Market Value and land_use_desc -- it does NOT capture
@@ -41,28 +31,36 @@ Postgres. Extending parse_parcel() in vgsi_assessment_scraper.py to
 capture more fields is a separate, deliberate future task, not done here.
 
 Usage:
+    python -m spiders.nh_spider Lincoln --town-slug lincolnnh --pid-end 20000 --out data/
     python -m spiders.nh_spider Lincoln --granit-geojson lincoln_nh.geojson \\
-        --town-slug lincolnnh --pid-end 20000 --out data/
+        --town-slug lincolnnh --pid-end 20000 --out data/   # skip live GRANIT fetch, reuse a file
 """
 
 import sys
 import json
 import argparse
-import subprocess
 from pathlib import Path
 from datetime import date
 
-from .base import StateSpider, SpiderError
+from ..common.base import StateSpider, SpiderError
 
-# Directory containing the existing NH pipeline scripts. Adjust if they
-# live somewhere else relative to this file.
-PIPELINE_DIR = Path(__file__).parent.parent
+# Directory containing the NH pipeline scripts (granit_parcel_downloader.py,
+# vgsi_assessment_scraper.py, vgsi_targeted_lookup.py,
+# join_parcels_assessments.py) -- these live alongside this file, inside
+# spiders/, not in the project root. Added to sys.path (not just relied on
+# as a package) so these scripts stay runnable standalone from the command
+# line too (e.g. `cd spiders && python vgsi_assessment_scraper.py ...`),
+# which is how they've been used throughout this project -- switching them
+# to relative package imports would break that.
+PIPELINE_DIR = Path(__file__).parent
 sys.path.insert(0, str(PIPELINE_DIR))
 
 try:
+    import granit_parcel_downloader  # real GRANIT fetch, direct ArcGIS query
     import vgsi_assessment_scraper  # the fixed, two-pass version
     import join_parcels_assessments  # the fixed, collision-safe version
 except ImportError as e:
+    granit_parcel_downloader = None
     vgsi_assessment_scraper = None
     join_parcels_assessments = None
     _IMPORT_ERROR = e
@@ -119,13 +117,14 @@ class NHSpider(StateSpider):
     def _get_granit_geojson(self, town: str) -> str:
         if self.granit_geojson_override:
             return self.granit_geojson_override
-        # UNVERIFIED CLI convention -- see module docstring.
+        # Direct call, same pattern as ct_spider.py -- no subprocess.
         out_path = f"{town.lower()}_nh.geojson"
-        print(f"  running granit_parcel_downloader.py for {town} (unverified CLI args)...")
-        subprocess.run(
-            ["python", "granit_parcel_downloader.py", town],
-            check=True, cwd=PIPELINE_DIR,
-        )
+        print(f"  fetching GRANIT parcels for {town}...")
+        features = granit_parcel_downloader.fetch_town_parcels(town)
+        geojson = {"type": "FeatureCollection", "features": features}
+        with open(out_path, "w") as f:
+            json.dump(geojson, f)
+        print(f"  wrote {len(features)} GRANIT parcels to {out_path}")
         return out_path
 
     def _normalize_feature(self, feature: dict, town: str) -> dict:
