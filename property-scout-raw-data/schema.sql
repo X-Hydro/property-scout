@@ -33,8 +33,8 @@ CREATE TABLE IF NOT EXISTS property_values (
     loaded_at                TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS property_values_state_muni_idx ON properties (state, municipality);
-CREATE INDEX IF NOT EXISTS property_values_geometry_gix ON properties USING GIST (geometry);
+CREATE INDEX IF NOT EXISTS property_values_state_muni_idx ON property_values (state, municipality);
+CREATE INDEX IF NOT EXISTS property_values_geometry_gix ON property_values USING GIST (geometry);
 --
 CREATE TABLE IF NOT EXISTS listings (
     listing_id          TEXT PRIMARY KEY,        -- RentCast's own id, e.g. "13-Maple-St,-Lincoln,-NH-03251"
