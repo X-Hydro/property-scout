@@ -1,10 +1,10 @@
 -- Property Values Database schema
--- Run once: psql -d propertyvalues -f schema.sql
+-- Run once: psql -h localhost -p 5432 -U oncoord -d property-scout -f schema.sql
 
 CREATE EXTENSION IF NOT EXISTS postgis;
 
-CREATE TABLE IF NOT EXISTS properties (
-    property_id             TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS property_values (
+    property_id              TEXT PRIMARY KEY,
     state                    TEXT,
     county                   TEXT,
     municipality             TEXT,
@@ -33,5 +33,62 @@ CREATE TABLE IF NOT EXISTS properties (
     loaded_at                TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS properties_state_muni_idx ON properties (state, municipality);
-CREATE INDEX IF NOT EXISTS properties_geometry_gix ON properties USING GIST (geometry);
+CREATE INDEX IF NOT EXISTS property_values_state_muni_idx ON properties (state, municipality);
+CREATE INDEX IF NOT EXISTS property_values_geometry_gix ON properties USING GIST (geometry);
+--
+CREATE TABLE IF NOT EXISTS listings (
+    listing_id          TEXT PRIMARY KEY,        -- RentCast's own id, e.g. "13-Maple-St,-Lincoln,-NH-03251"
+    formatted_address    TEXT,
+    address_line_1       TEXT,
+    address_line_2       TEXT,
+    city                 TEXT,
+    state                TEXT,
+    zip_code             TEXT,
+    county               TEXT,
+    latitude             DOUBLE PRECISION,
+    longitude            DOUBLE PRECISION,
+    geometry             GEOMETRY(Point, 4326),   -- generated from lat/lon, see trigger below
+
+    property_type        TEXT,
+    bedrooms              DOUBLE PRECISION,
+    bathrooms             DOUBLE PRECISION,
+    square_footage        DOUBLE PRECISION,
+    lot_size              DOUBLE PRECISION,        -- RentCast: sq ft, confirm before mixing with `properties.acreage`
+    year_built            INTEGER,
+
+    status                TEXT,                    -- Active, Sold, etc.
+    price                 DOUBLE PRECISION,
+    listing_type          TEXT,
+    listed_date           DATE,
+    removed_date          DATE,
+    days_on_market        INTEGER,
+
+    mls_name              TEXT,
+    mls_number            TEXT,
+
+    agent                 JSONB,                    -- name/phone/email/website -- display-only, not queried
+    office                JSONB,                    -- same
+    price_history         JSONB,                    -- RentCast's `history` object, kept as-is -- a real
+                                                    -- time series, not something to flatten into columns
+
+    source                TEXT DEFAULT 'RentCast',
+    fetched_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS listings_city_state_idx ON listings (city, state);
+CREATE INDEX IF NOT EXISTS listings_geometry_gix ON listings USING GIST (geometry);
+CREATE INDEX IF NOT EXISTS listings_status_idx ON listings (status);
+
+-- Tracks WHEN an area was last fetched from RentCast, so the lazy-cache
+-- layer can decide "do we already have recent enough data" without
+-- scanning the listings table itself. scope_type/scope_value examples:
+-- ('city', 'Lincoln,NH'), ('zip', '03251').
+CREATE TABLE IF NOT EXISTS listing_fetch_log (
+    id           SERIAL PRIMARY KEY,
+    scope_type   TEXT NOT NULL,
+    scope_value  TEXT NOT NULL,
+    fetched_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    result_count INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS listing_fetch_log_scope_idx ON listing_fetch_log (scope_type, scope_value, fetched_at DESC);
