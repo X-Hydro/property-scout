@@ -1,9 +1,7 @@
 package com.oncoord.propertyscout.listingdata;
 
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.oncoord.propertyscout.listingdata.ListingDataProvider;
 import com.oncoord.propertyscout.model.Listing;
 import org.springframework.stereotype.Component;
 
@@ -21,17 +19,24 @@ import java.util.Set;
  * specific -- the endpoint path, RentCast's own query param names, and its
  * JSON response shape -- is contained here. Callers only see
  * ListingDataProvider's domain-shaped method and the existing Listing model.
+ * Lives in the same neutral `listingdata` package as the interface
+ * (deliberately no `rentcast` package) so nothing about the package
+ * structure implies lock-in to one provider -- a second implementation
+ * would sit right next to this one, same package, different class name.
  *
- * NOTE: the endpoint path and param names below (LISTINGS_ENDPOINT,
- * "status"/"propertyType"/"limit") are best-guess based on RentCast's
- * general API conventions -- confirm the exact path/params/pagination
- * against RentCast's own docs before relying on this against live traffic.
+ * Endpoint, params, and header confirmed against a working curl call
+ * (get_listings.sh): GET https://api.rentcast.io/v1/listings/sale with
+ * city/state/status/propertyType/limit/includeTotalCount and an X-Api-Key
+ * header. propertyType takes multiple values pipe-delimited, e.g.
+ * "Single Family|Land" -- sent server-side so RentCast only returns what's
+ * needed, since every listing it doesn't need to return is money saved.
  */
 @Component
 public class RentCastListingDataProvider implements ListingDataProvider {
 
     private static final String LISTINGS_ENDPOINT = "listings/sale";
     private static final Duration LISTINGS_TTL = Duration.ofHours(6); // active listings go stale fast
+    private static final int DEFAULT_LIMIT = 50; // matches get_listings.sh; RentCast may support a higher max -- confirm before raising
 
     private final RentCastService rentCastService;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -53,20 +58,25 @@ public class RentCastListingDataProvider implements ListingDataProvider {
             params.put("city", city);
         }
         params.put("status", "Active");
+        if (propertyTypes != null && !propertyTypes.isEmpty()) {
+            params.put("propertyType", String.join("|", propertyTypes));
+        }
+        params.put("limit", String.valueOf(DEFAULT_LIMIT));
+        params.put("includeTotalCount", "true");
 
         RentCastService.ListingSourceResult result = rentCastService.fetch(LISTINGS_ENDPOINT, params, LISTINGS_TTL);
 
         List<Listing> listings = new ArrayList<>();
         try {
             JsonNode root = objectMapper.readTree(result.body());
+            // includeTotalCount=true may wrap the array in an object (e.g.
+            // {"listings": [...], "total": N}) rather than returning a bare
+            // array -- confirm the real shape against a live response and
+            // adjust this if root isn't a plain array.
             if (!root.isArray()) {
                 return listings;
             }
             for (JsonNode node : root) {
-                String type = text(node, "propertyType");
-                if (propertyTypes != null && !propertyTypes.isEmpty() && !propertyTypes.contains(type)) {
-                    continue;
-                }
                 listings.add(toListing(node));
             }
         } catch (Exception e) {

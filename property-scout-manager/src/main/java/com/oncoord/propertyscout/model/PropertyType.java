@@ -21,4 +21,25 @@ public enum PropertyType {
     public String toString() {
         return value;
     }
+
+    /**
+     * Lenient lookup by value (case-insensitive), for parsing raw text out
+     * of property_values.property_type -- scraped assessor data, so it can
+     * contain values this enum doesn't cover (Commercial, Condo - No Land,
+     * Common Land, etc). Returns null rather than throwing on those; callers
+     * treat null as "not a known-good comp type", not "unknown/unverified" --
+     * the distinction between "no value at all" and "a value that just isn't
+     * PropertyType" still needs to be made by the caller from the raw string.
+     */
+    public static PropertyType fromValue(String value) {
+        if (value == null) {
+            return null;
+        }
+        for (PropertyType type : values()) {
+            if (type.value.equalsIgnoreCase(value.trim())) {
+                return type;
+            }
+        }
+        return null;
+    }
 }
