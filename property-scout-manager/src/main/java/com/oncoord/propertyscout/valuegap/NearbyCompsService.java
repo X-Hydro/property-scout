@@ -19,13 +19,12 @@ import java.util.Set;
  * than re-deriving anything from raw GRANIT files.
  *
  * Known simplification vs. the Python version: target-parcel resolution
- * here is point-in-polygon only. Python's resolve_listing_to_parcel() also
- * falls back to address matching when no polygon contains the point, and
- * rejects a resolved parcel if it's implausibly large vs. the listing's own
- * reported lot size (the "subdivision lot not yet in GRANIT" case). Neither
- * fallback is implemented yet -- an unresolved target here just returns
- * Optional.empty() from resolveTargetParcel, same as Python's "unresolved"
- * case, just without the second attempt.
+ * here is point-in-polygon plus the implausible-size sanity check, but
+ * NOT the address-matching fallback. Python's resolve_listing_to_parcel()
+ * falls back to address matching when point-in-polygon finds nothing, or
+ * when it finds something but rejects it as implausibly large. Here, both
+ * of those cases just return Optional.empty() -- same as Python's
+ * "unresolved" case, just without the second attempt.
  */
 @Service
 public class NearbyCompsService {
@@ -34,6 +33,9 @@ public class NearbyCompsService {
     private static final double DEFAULT_FAR_RADIUS_M = 250;
     private static final double DEFAULT_LOT_SIZE_RATIO_TOLERANCE = 2.5;
     private static final double TOUCH_TOLERANCE_M = 5; // ~ NEIGHBOR_BUFFER_DEG in find_abutters.py
+    private static final double SQM_PER_ACRE = 4046.8564224; // matches find_abutters.py's constant exactly
+    private static final double SQFT_PER_ACRE = 43560;
+    private static final double ABSOLUTE_MAX_PLAUSIBLE_ACRES = 200; // no stated lot size to check against
 
     // Which PropertyType values (== VGSI land_use_desc) are worth showing as
     // a candidate at all. Anything else -- a raw string that doesn't map to
@@ -53,14 +55,33 @@ public class NearbyCompsService {
     }
 
     /**
-     * Resolve a listing's lat/lon to its own parcel via point-in-polygon.
-     * If the point falls inside more than one polygon, prefers the smallest
-     * (mirrors Python's "overlapping geometry -> take the smallest" rule).
+     * Resolve a listing's lat/lon to its own parcel via point-in-polygon,
+     * with the same sanity check as Python's is_plausible_size(): a
+     * resolved parcel whose acreage is wildly larger than the listing's
+     * own reported lot size is rejected rather than trusted (the "brand-new
+     * subdivision lot's point lands inside the old, not-yet-subdivided
+     * parent tract" case). Acreage for this check is computed fresh from
+     * the polygon itself (ST_Area), not read from the acreage attribute
+     * column, which can be null or stale -- same as Python recomputing
+     * polygon_area_acres every time rather than trusting a stored value.
+     *
+     * If the point falls inside more than one polygon, prefers the
+     * smallest (mirrors Python's "overlapping geometry -> take the
+     * smallest" rule) -- and it's that smallest one's size which gets
+     * sanity-checked, matching Python exactly.
+     *
+     * @param listingLotSizeSqFt the listing's own reported lot size in
+     *                            square feet (RentCast's units), or null if
+     *                            not reported. Null falls back to an
+     *                            absolute 200-acre cap, same as Python.
      */
-    public Optional<TargetParcel> resolveTargetParcel(double latitude, double longitude) {
+    public Optional<TargetParcel> resolveTargetParcel(
+            double latitude, double longitude, Double listingLotSizeSqFt) {
+
         String sql = """
             SELECT property_id, ST_AsText(geometry) AS geom_wkt, address, acreage,
-                   assessed_value, property_type
+                   assessed_value, property_type,
+                   ST_Area(geometry::geography) / ? AS computed_acres
             FROM property_values
             WHERE geometry IS NOT NULL
               AND ST_Contains(geometry, ST_SetSRID(ST_MakePoint(?, ?), 4326))
@@ -68,8 +89,16 @@ public class NearbyCompsService {
             LIMIT 1
             """;
 
+        Double expectedAcres = listingLotSizeSqFt == null ? null : listingLotSizeSqFt / SQFT_PER_ACRE;
+
         return jdbcTemplate.query(sql, rs -> {
             if (!rs.next()) {
+                return Optional.empty();
+            }
+            double computedAcres = rs.getDouble("computed_acres");
+            if (!isPlausibleSize(computedAcres, expectedAcres)) {
+                // Suspect match, same as Python -- don't use it. Python
+                // would try address matching next; not implemented here.
                 return Optional.empty();
             }
             return Optional.of(new TargetParcel(
@@ -80,7 +109,15 @@ public class NearbyCompsService {
                     (Double) rs.getObject("assessed_value"),
                     PropertyType.fromValue(rs.getString("property_type"))
             ));
-        }, longitude, latitude);
+        }, SQM_PER_ACRE, longitude, latitude);
+    }
+
+    /** Direct port of find_abutters.py's is_plausible_size(). */
+    private boolean isPlausibleSize(double candidateAcres, Double expectedAcres) {
+        if (expectedAcres == null) {
+            return candidateAcres <= ABSOLUTE_MAX_PLAUSIBLE_ACRES;
+        }
+        return candidateAcres <= Math.max(expectedAcres * 20, 5);
     }
 
     public List<CompCandidate> findComps(TargetParcel target, boolean targetIsLand) {

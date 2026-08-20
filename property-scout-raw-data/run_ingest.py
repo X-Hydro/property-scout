@@ -6,11 +6,11 @@ AuctionScout's run-scout.py pattern: a REGISTRY dict mapping a short key
 to a spider class, selected on the command line.
 
 Each state's constructor needs different arguments (CT and MA need none;
-NH needs granit_geojson/town_slug/pid_end) -- rather than a growing
-if/elif per state (which doesn't actually scale to "any spider," it just
-hardcodes each one), SPIDER_KWARGS below maps each state key to which of
-this orchestrator's CLI args its constructor wants, by parameter name. A
-spider needing no special args (CT, MA) just doesn't appear in
+NH needs granit_geojson/town_slug/pid_end/out_dir) -- rather than a
+growing if/elif per state (which doesn't actually scale to "any spider,"
+it just hardcodes each one), SPIDER_KWARGS below maps each state key to
+which of this orchestrator's CLI args its constructor wants, by parameter
+name. A spider needing no special args (CT, MA) just doesn't appear in
 SPIDER_KWARGS at all. Adding a new spider means adding one line here, not
 a new branch.
 
@@ -21,12 +21,23 @@ default), not with --granit-geojson set. MA no longer has this limitation
 -- it was file-based and single-town at first, but was rewritten as a
 live query (see ma_spider.py's module docstring), same as CT.
 
+FIXED: NH's constructor now also takes out_dir (see nh_spider.py's module
+docstring -- its intermediate files, previously hardcoded to the current
+working directory regardless of --out, now write under --out like
+everything else this orchestrator produces). Added "out_dir": "out" to
+SPIDER_KWARGS["nh"] below so that actually reaches the spider; --out
+itself was already being parsed, just never threaded through to NH's
+constructor before now.
+
 Usage:
     python run_ingest.py --state ct --towns Bristol "New Haven" --out data/
     python run_ingest.py --state nh --towns Lincoln --pid-end 20000 --out data/
     python run_ingest.py --state ma --towns Andover --out data/
     python run_ingest.py --state ct nh --towns Bristol Lincoln --out data/
     python run_ingest.py --state ma --all-towns --out ma_data
+    python run_ingest.py --state nh --towns Lincoln --out nh_data_v2/
+
+
 """
 
 import argparse
@@ -51,6 +62,7 @@ SPIDER_KWARGS = {
         "granit_geojson": "granit_geojson",
         "town_slug": "town_slug",
         "pid_end": "pid_end",
+        "out_dir": "out",
     },
     # ma intentionally absent -- MASpider takes no constructor args since
     # its rewrite as a live query (was file-based, needed geojson_path;

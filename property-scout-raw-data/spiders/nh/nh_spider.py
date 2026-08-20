@@ -10,7 +10,9 @@ guessing:
   - vgsi_assessment_scraper.scrape_town()  (assessed value, Pass 1
     sequential + Pass 2 targeted-address-lookup fallback)
   - join_parcels_assessments.join()         (collision-safe 4-component
-    MBLU key -- the condo-unit-collision fix)
+    MBLU key -- the condo-unit-collision fix; now also a LEFT join, see
+    that module's docstring -- a GRANIT parcel with no VGSI match still
+    keeps its geometry, just with null value fields)
 This spider does not reimplement any of that -- it imports and calls the
 real, already-fixed functions, and only adds a final step: read the
 joined GeoJSON and remap its fields into COMMON_SCHEMA_FIELDS.
@@ -29,6 +31,18 @@ CT's after normalization. This is a real asymmetry, not a bug -- worth
 knowing before assuming both states will look equally complete in
 Postgres. Extending parse_parcel() in vgsi_assessment_scraper.py to
 capture more fields is a separate, deliberate future task, not done here.
+
+FIXED: intermediate files (<town>_nh.geojson, <town>_assessments.csv,
+<town>_joined.geojson) previously wrote to bare relative filenames --
+meaning they landed in the process's current working directory,
+completely ignoring --out. Silent and easy to miss (the final normalized
+records still went to --out via StateSpider.run(), so nothing looked
+obviously broken), but it meant a run's own intermediate artifacts
+weren't actually kept with everything else that run produced, and could
+even get overwritten by a later run for a different town before anyone
+noticed. Now takes out_dir at construction (same pattern as
+granit_geojson/town_slug/pid_end -- see run_ingest.py's SPIDER_KWARGS)
+and writes every intermediate file under it.
 
 Usage:
     python -m spiders.nh_spider Lincoln --town-slug lincolnnh --pid-end 20000 --out data/
@@ -58,7 +72,7 @@ sys.path.insert(0, str(PIPELINE_DIR))
 try:
     import granit_parcel_downloader  # real GRANIT fetch, direct ArcGIS query
     import vgsi_assessment_scraper  # the fixed, two-pass version
-    import join_parcels_assessments  # the fixed, collision-safe version
+    import join_parcels_assessments  # the fixed, collision-safe, left-join version
 except ImportError as e:
     granit_parcel_downloader = None
     vgsi_assessment_scraper = None
@@ -103,7 +117,8 @@ def _ring_centroid_from_geojson(geometry: dict | None) -> tuple[float | None, fl
 class NHSpider(StateSpider):
     state_code = "NH"
 
-    def __init__(self, granit_geojson: str = None, town_slug: str = None, pid_end: int = 20000):
+    def __init__(self, granit_geojson: str = None, town_slug: str = None,
+                 pid_end: int = 20000, out_dir: str = "data"):
         if _IMPORT_ERROR is not None:
             raise SpiderError(
                 f"Could not import the NH pipeline scripts from {PIPELINE_DIR} -- "
@@ -113,19 +128,21 @@ class NHSpider(StateSpider):
         self.granit_geojson_override = granit_geojson
         self.town_slug_override = town_slug
         self.pid_end = pid_end
+        self.out_dir = Path(out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_granit_geojson(self, town: str) -> str:
         if self.granit_geojson_override:
             return self.granit_geojson_override
         # Direct call, same pattern as ct_spider.py -- no subprocess.
-        out_path = f"{town.lower()}_nh.geojson"
+        out_path = self.out_dir / f"{town.lower()}_nh.geojson"
         print(f"  fetching GRANIT parcels for {town}...")
         features = granit_parcel_downloader.fetch_town_parcels(town)
         geojson = {"type": "FeatureCollection", "features": features}
         with open(out_path, "w") as f:
             json.dump(geojson, f)
         print(f"  wrote {len(features)} GRANIT parcels to {out_path}")
-        return out_path
+        return str(out_path)
 
     def _normalize_feature(self, feature: dict, town: str) -> dict:
         props = feature.get("properties", {})
@@ -167,8 +184,8 @@ class NHSpider(StateSpider):
         town_slug = self.town_slug_override or _guess_vgsi_town_slug(town)
         granit_geojson_path = self._get_granit_geojson(town)
 
-        assessments_csv = f"{town.lower()}_assessments.csv"
-        joined_geojson = f"{town.lower()}_joined.geojson"
+        assessments_csv = str(self.out_dir / f"{town.lower()}_assessments.csv")
+        joined_geojson = str(self.out_dir / f"{town.lower()}_joined.geojson")
 
         print(f"  scraping VGSI ({town_slug}, pid_end={self.pid_end})...")
         vgsi_assessment_scraper.scrape_town(
@@ -212,6 +229,7 @@ def main():
         granit_geojson=args.granit_geojson,
         town_slug=args.town_slug,
         pid_end=args.pid_end,
+        out_dir=args.out,
     )
     spider.run(args.towns, args.out)
 
