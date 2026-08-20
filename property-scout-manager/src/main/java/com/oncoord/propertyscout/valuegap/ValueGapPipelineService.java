@@ -1,5 +1,6 @@
 package com.oncoord.propertyscout.valuegap;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.oncoord.propertyscout.model.Listing;
 import org.springframework.stereotype.Service;
 
@@ -20,14 +21,19 @@ public class ValueGapPipelineService {
     private final NearbyCompsService nearbyCompsService;
     private final GapComputationService gapComputationService;
     private final GapRankingService gapRankingService;
+    private final ObjectMapper objectMapper;
+
 
     public ValueGapPipelineService(
             NearbyCompsService nearbyCompsService,
             GapComputationService gapComputationService,
-            GapRankingService gapRankingService) {
+            GapRankingService gapRankingService,
+            ObjectMapper objectMapper) {
+
         this.nearbyCompsService = nearbyCompsService;
         this.gapComputationService = gapComputationService;
         this.gapRankingService = gapRankingService;
+        this.objectMapper = objectMapper;
     }
 
     /**
@@ -50,6 +56,15 @@ public class ValueGapPipelineService {
         boolean targetIsLand = "Land".equals(listing.getPropertyType());
         List<CompCandidate> candidates = nearbyCompsService.findComps(target.get(), targetIsLand);
 
+        com.fasterxml.jackson.databind.JsonNode targetGeometry = null;
+        if (target.get().getGeometryGeoJson() != null) {
+            try {
+                targetGeometry = objectMapper.readTree(target.get().getGeometryGeoJson());
+            } catch (Exception e) {
+                // leave null -- frontend falls back to point rendering
+            }
+        }
+
         GapResult result = gapComputationService.compute(
                 listing.getListingId(),
                 listing.getFormattedAddress(),
@@ -57,6 +72,9 @@ public class ValueGapPipelineService {
                 listing.getYearBuilt(),
                 listing.getPrice(),
                 target.get().getAssessedValue(),
+                listing.getLatitude(),
+                listing.getLongitude(),
+                targetGeometry,
                 candidates
         );
 

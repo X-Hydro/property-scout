@@ -1,5 +1,7 @@
 package com.oncoord.propertyscout.valuegap;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.oncoord.propertyscout.model.PropertyType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -37,6 +39,9 @@ public class NearbyCompsService {
     private static final double SQFT_PER_ACRE = 43560;
     private static final double ABSOLUTE_MAX_PLAUSIBLE_ACRES = 200; // no stated lot size to check against
 
+    private final ObjectMapper objectMapper;
+
+
     // Which PropertyType values (== VGSI land_use_desc) are worth showing as
     // a candidate at all. Anything else -- a raw string that doesn't map to
     // any PropertyType (Commercial, Condo - No Land, Common Land, etc.) --
@@ -50,8 +55,10 @@ public class NearbyCompsService {
 
     private final JdbcTemplate jdbcTemplate;
 
-    public NearbyCompsService(JdbcTemplate jdbcTemplate) {
+    public NearbyCompsService(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper ) {
         this.jdbcTemplate = jdbcTemplate;
+        this.objectMapper = objectMapper;
+
     }
 
     /**
@@ -79,15 +86,17 @@ public class NearbyCompsService {
             double latitude, double longitude, Double listingLotSizeSqFt) {
 
         String sql = """
-            SELECT property_id, ST_AsText(geometry) AS geom_wkt, address, acreage,
-                   assessed_value, property_type,
-                   ST_Area(geometry::geography) / ? AS computed_acres
-            FROM property_values
-            WHERE geometry IS NOT NULL
-              AND ST_Contains(geometry, ST_SetSRID(ST_MakePoint(?, ?), 4326))
-            ORDER BY ST_Area(geometry::geography) ASC
-            LIMIT 1
-            """;
+        SELECT property_id, ST_AsText(geometry) AS geom_wkt,
+               ST_AsGeoJSON(geometry) AS geom_geojson,
+               address, acreage,
+               assessed_value, property_type,
+               ST_Area(geometry::geography) / ? AS computed_acres
+        FROM property_values
+        WHERE geometry IS NOT NULL
+          AND ST_Contains(geometry, ST_SetSRID(ST_MakePoint(?, ?), 4326))
+        ORDER BY ST_Area(geometry::geography) ASC
+        LIMIT 1
+        """;
 
         Double expectedAcres = listingLotSizeSqFt == null ? null : listingLotSizeSqFt / SQFT_PER_ACRE;
 
@@ -97,13 +106,12 @@ public class NearbyCompsService {
             }
             double computedAcres = rs.getDouble("computed_acres");
             if (!isPlausibleSize(computedAcres, expectedAcres)) {
-                // Suspect match, same as Python -- don't use it. Python
-                // would try address matching next; not implemented here.
                 return Optional.empty();
             }
             return Optional.of(new TargetParcel(
                     rs.getString("property_id"),
                     rs.getString("geom_wkt"),
+                    rs.getString("geom_geojson"),
                     rs.getString("address"),
                     (Double) rs.getObject("acreage"),
                     (Double) rs.getObject("assessed_value"),
@@ -149,15 +157,16 @@ public class NearbyCompsService {
         String targetStreet = ValueGapUtils.streetNameOnly(target.getAddress());
 
         String sql = """
-            SELECT property_id, address, city, property_type, assessed_value, acreage,
-                   latitude, longitude,
-                   ST_Distance(geometry::geography, ST_GeomFromText(?, 4326)::geography) AS distance_m,
-                   ST_DWithin(geometry::geography, ST_GeomFromText(?, 4326)::geography, ?) AS touches
-            FROM property_values
-            WHERE geometry IS NOT NULL
-              AND property_id <> ?
-              AND ST_DWithin(geometry::geography, ST_GeomFromText(?, 4326)::geography, ?)
-            """;
+        SELECT property_id, address, city, property_type, assessed_value, acreage,
+               latitude, longitude,
+               ST_AsGeoJSON(geometry) AS geom_geojson,
+               ST_Distance(geometry::geography, ST_GeomFromText(?, 4326)::geography) AS distance_m,
+               ST_DWithin(geometry::geography, ST_GeomFromText(?, 4326)::geography, ?) AS touches
+        FROM property_values
+        WHERE geometry IS NOT NULL
+          AND property_id <> ?
+          AND ST_DWithin(geometry::geography, ST_GeomFromText(?, 4326)::geography, ?)
+        """;
 
         List<CompCandidate> candidates = new ArrayList<>();
         String wkt = target.getGeometryWkt();
@@ -184,24 +193,30 @@ public class NearbyCompsService {
                 foundVia.add("near_same_street");
             }
             if (foundVia.isEmpty()) {
-                return; // didn't qualify under any rule
+                return;
             }
 
-            // --- Stage B filtering, same as find_abutters.py ---
             if (address == null || address.isBlank()) {
                 return;
             }
             if (!targetIsLand && !ValueGapUtils.lotSizeSimilar(target.getAcres(), acres, lotSizeRatioTolerance)) {
                 return;
             }
-            // rawPropertyType != null but propertyType == null means "known,
-            // just not one of our PropertyType values" (e.g. Commercial) --
-            // still excluded, same as before. rawPropertyType == null means
-            // genuinely no assessor match -- kept, tagged unverified below.
+
             if (rawPropertyType != null && !COMP_ELIGIBLE_TYPES.contains(propertyType)) {
                 return;
             }
             Boolean compEligible = rawPropertyType == null ? null : COMP_ELIGIBLE_TYPES.contains(propertyType);
+
+            JsonNode geometry = null;
+            String geomGeoJson = rs.getString("geom_geojson");
+            if (geomGeoJson != null) {
+                try {
+                    geometry = objectMapper.readTree(geomGeoJson);
+                } catch (Exception e) {
+                    // leave null -- frontend falls back to point rendering for this candidate
+                }
+            }
 
             candidates.add(new CompCandidate(
                     rs.getString("property_id"),
@@ -214,7 +229,8 @@ public class NearbyCompsService {
                     rs.getDouble("latitude"),
                     rs.getDouble("longitude"),
                     foundVia,
-                    compEligible
+                    compEligible,
+                    geometry
             ));
         }, wkt, wkt, TOUCH_TOLERANCE_M, target.getPropertyId(), wkt, farRadiusM);
 

@@ -6,16 +6,18 @@ public class TargetParcel {
 
     private final String propertyId;
     private final String geometryWkt;
+    private final String geometryGeoJson;
     private final String address;
     private final Double acres;
     private final Double assessedValue;
     private final PropertyType propertyType;
 
     public TargetParcel(
-            String propertyId, String geometryWkt, String address,
+            String propertyId, String geometryWkt, String geometryGeoJson, String address,
             Double acres, Double assessedValue, PropertyType propertyType) {
         this.propertyId = propertyId;
         this.geometryWkt = geometryWkt;
+        this.geometryGeoJson = geometryGeoJson;
         this.address = address;
         this.acres = acres;
         this.assessedValue = assessedValue;
@@ -28,6 +30,10 @@ public class TargetParcel {
 
     public String getGeometryWkt() {
         return geometryWkt;
+    }
+
+    public String getGeometryGeoJson() {
+        return geometryGeoJson;
     }
 
     public String getAddress() {

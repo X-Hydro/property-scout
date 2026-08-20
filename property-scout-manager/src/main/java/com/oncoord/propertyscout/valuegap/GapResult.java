@@ -24,9 +24,15 @@ public class GapResult {
     /** Set later by GapRankingService once the full ranked group is known. */
     private Double relativeGapPct;
 
+    private final Double targetLatitude;
+    private final Double targetLongitude;
+    private final com.fasterxml.jackson.databind.JsonNode targetGeometry;
+
     public GapResult(
             String listingId, String address, String propertyType, Integer yearBuilt,
-            double price, Double targetAssessedValue, boolean targetIsLand,
+            double price, Double targetAssessedValue,
+            Double targetLatitude, Double targetLongitude, com.fasterxml.jackson.databind.JsonNode targetGeometry,
+            boolean targetIsLand,
             List<CompCandidate> candidates, boolean hasComps, List<Double> comps,
             Double compMedian, Double compMin, Double compMax, Double gap, Double gapPct) {
         this.listingId = listingId;
@@ -35,6 +41,9 @@ public class GapResult {
         this.yearBuilt = yearBuilt;
         this.price = price;
         this.targetAssessedValue = targetAssessedValue;
+        this.targetLatitude = targetLatitude;
+        this.targetLongitude = targetLongitude;
+        this.targetGeometry = targetGeometry;
         this.targetIsLand = targetIsLand;
         this.candidates = candidates;
         this.hasComps = hasComps;
@@ -45,6 +54,10 @@ public class GapResult {
         this.gap = gap;
         this.gapPct = gapPct;
     }
+
+    public Double getTargetLatitude() { return targetLatitude; }
+    public Double getTargetLongitude() { return targetLongitude; }
+    public com.fasterxml.jackson.databind.JsonNode getTargetGeometry() { return targetGeometry; }
 
     public String getListingId() {
         return listingId;

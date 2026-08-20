@@ -34,6 +34,9 @@ public class GapComputationService {
             Integer yearBuilt,
             double price,
             Double targetAssessedValue,
+            Double targetLatitude,
+            Double targetLongitude,
+            com.fasterxml.jackson.databind.JsonNode targetGeometry,
             List<CompCandidate> candidates) {
 
         boolean targetIsLand = "Land".equals(propertyType);
@@ -48,6 +51,7 @@ public class GapComputationService {
         if (comps.isEmpty()) {
             return new GapResult(
                     listingId, address, propertyType, yearBuilt, price, targetAssessedValue,
+                    targetLatitude, targetLongitude, targetGeometry,
                     targetIsLand, candidates, false, comps, null, null, null, null, null
             );
         }
@@ -64,7 +68,9 @@ public class GapComputationService {
 
         return new GapResult(
                 listingId, address, propertyType, yearBuilt, price, targetAssessedValue,
+                targetLatitude, targetLongitude, targetGeometry,
                 targetIsLand, candidates, true, comps, median, min, max, gap, gapPct
         );
+
     }
 }
