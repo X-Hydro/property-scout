@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS listings (
     fetched_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS listings_city_state_idx ON listings (city, state);
+CREATE INDEX IF NOT EXISTS listings_state_city_idx ON listings (state, city);
 CREATE INDEX IF NOT EXISTS listings_geometry_gix ON listings USING GIST (geometry);
 CREATE INDEX IF NOT EXISTS listings_geography_gix ON listings USING GIST ((geometry::geography));
 CREATE INDEX IF NOT EXISTS listings_status_idx ON listings (status);

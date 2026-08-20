@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.oncoord.propertyscout.mapper.ListingRowMapper;
 import com.oncoord.propertyscout.model.Listing;
+import com.oncoord.propertyscout.model.StateCityRec;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -209,5 +210,12 @@ public class ListingsService {
             return null;
         }
         return node.toString();
+    }
+
+    public List<StateCityRec> getStateCity() {
+        return jdbcTemplate.query(
+                "SELECT DISTINCT state, city FROM listings ORDER BY state, city",
+                (rs, rowNum) -> new StateCityRec(rs.getString("state"), rs.getString("city"))
+        );
     }
 }

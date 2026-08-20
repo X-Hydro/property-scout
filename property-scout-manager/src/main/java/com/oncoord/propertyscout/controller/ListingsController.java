@@ -1,6 +1,7 @@
 package com.oncoord.propertyscout.controller;
 
 import com.oncoord.propertyscout.model.Listing;
+import com.oncoord.propertyscout.model.StateCityRec;
 import com.oncoord.propertyscout.service.ListingIngestionService;
 import com.oncoord.propertyscout.service.ListingsService;
 import org.springframework.http.ResponseEntity;
@@ -63,4 +64,10 @@ public class ListingsController {
         int count = listingIngestionService.ingestActiveListings(state, city, propertyTypes);
         return Map.of("upserted", count);
     }
+
+    @GetMapping("/state-city")
+    public List<StateCityRec> getStateCity() {
+        return listingsService.getStateCity();
+    }
+
 }
