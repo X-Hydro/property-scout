@@ -32,21 +32,30 @@ knowing before assuming both states will look equally complete in
 Postgres. Extending parse_parcel() in vgsi_assessment_scraper.py to
 capture more fields is a separate, deliberate future task, not done here.
 
-FIXED: intermediate files (<town>_nh.geojson, <town>_assessments.csv,
-<town>_joined.geojson) previously wrote to bare relative filenames --
-meaning they landed in the process's current working directory,
-completely ignoring --out. Silent and easy to miss (the final normalized
-records still went to --out via StateSpider.run(), so nothing looked
-obviously broken), but it meant a run's own intermediate artifacts
-weren't actually kept with everything else that run produced, and could
-even get overwritten by a later run for a different town before anyone
-noticed. Now takes out_dir at construction (same pattern as
-granit_geojson/town_slug/pid_end -- see run_ingest.py's SPIDER_KWARGS)
-and writes every intermediate file under it.
+FIXED: intermediate files (<town>_nh_raw_parcels.geojson,
+<town>_nh_assessments.csv, <town>_nh_joined.geojson) previously wrote to
+bare relative filenames -- meaning they landed in the process's current
+working directory, completely ignoring --out. Silent and easy to miss
+(the final normalized records still went to --out via StateSpider.run(),
+so nothing looked obviously broken), but it meant a run's own
+intermediate artifacts weren't actually kept with everything else that
+run produced, and could even get overwritten by a later run for a
+different town before anyone noticed. Now takes out_dir at construction
+(same pattern as granit_geojson/town_slug/pid_end -- see
+run_ingest.py's SPIDER_KWARGS) and writes every intermediate file under
+it.
+
+NAMING: all three intermediates above are written with a "nh_"-suffixed,
+descriptive tag (_nh_raw_parcels / _nh_assessments / _nh_joined) so
+they're unmistakably not the final loadable file. The final normalized
+output -- the one StateSpider.run() writes and the one that actually
+gets loaded into property_values -- uses the base spider's own
+"<state>_<town>.geojson" convention (e.g. nh_lebanon.geojson), with no
+such suffix, so that naming alone tells you which file to load.
 
 Usage:
     python -m spiders.nh_spider Lincoln --town-slug lincolnnh --pid-end 20000 --out data/
-    python -m spiders.nh_spider Lincoln --granit-geojson lincoln_nh.geojson \\
+    python -m spiders.nh_spider Lincoln --granit-geojson lincoln_nh_raw_parcels.geojson \\
         --town-slug lincolnnh --pid-end 20000 --out data/   # skip live GRANIT fetch, reuse a file
 """
 
@@ -135,7 +144,10 @@ class NHSpider(StateSpider):
         if self.granit_geojson_override:
             return self.granit_geojson_override
         # Direct call, same pattern as ct_spider.py -- no subprocess.
-        out_path = self.out_dir / f"{town.lower()}_nh.geojson"
+        # Named *_raw_parcels (not just "<town>_nh.geojson") to make clear
+        # this is GRANIT geometry only, before VGSI assessments are joined
+        # in -- not the file that gets loaded into property_values.
+        out_path = self.out_dir / f"{town.lower()}_nh_raw_parcels.geojson"
         print(f"  fetching GRANIT parcels for {town}...")
         features = granit_parcel_downloader.fetch_town_parcels(town)
         geojson = {"type": "FeatureCollection", "features": features}
@@ -184,8 +196,12 @@ class NHSpider(StateSpider):
         town_slug = self.town_slug_override or _guess_vgsi_town_slug(town)
         granit_geojson_path = self._get_granit_geojson(town)
 
-        assessments_csv = str(self.out_dir / f"{town.lower()}_assessments.csv")
-        joined_geojson = str(self.out_dir / f"{town.lower()}_joined.geojson")
+        assessments_csv = str(self.out_dir / f"{town.lower()}_nh_assessments.csv")
+        # Last intermediate step (GRANIT geometry + VGSI assessments joined)
+        # -- still not the final normalized file StateSpider.run() writes
+        # (that one, built from _normalize_feature() below, is the one
+        # actually loaded into property_values).
+        joined_geojson = str(self.out_dir / f"{town.lower()}_nh_joined.geojson")
 
         print(f"  scraping VGSI ({town_slug}, pid_end={self.pid_end})...")
         vgsi_assessment_scraper.scrape_town(
@@ -213,7 +229,8 @@ def _to_float(v):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("towns", nargs="+", help="NH town names, e.g. Lincoln")
-    parser.add_argument("--granit-geojson", help="use an already-downloaded GRANIT geojson "
+    parser.add_argument("--granit-geojson", help="use an already-downloaded GRANIT raw-parcels "
+                                                    "geojson (e.g. <town>_nh_raw_parcels.geojson) "
                                                     "instead of running granit_parcel_downloader.py "
                                                     "(only valid for a single town)")
     parser.add_argument("--town-slug", help="VGSI town slug override, e.g. lincolnnh")
