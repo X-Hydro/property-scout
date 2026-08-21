@@ -43,81 +43,26 @@ import time
 import re
 import requests
 import json
+from pathlib import Path
 from bs4 import BeautifulSoup
+
+# Shared property-type standardization, used by every state spider (see
+# spiders/common/property_types.py's module docstring) -- this used to be
+# a LAND_USE_STANDARDIZATION dict local to this file, but that meant NH's
+# vocabulary fixes (Lincoln vs. Lebanon) lived nowhere MA or CT could
+# reuse them. Added to sys.path the same way nh_spider.py adds this
+# file's own directory for granit_parcel_downloader.py etc. -- keeps this
+# script runnable standalone from the command line (per this docstring's
+# own Usage line), not just importable as part of the spiders package.
+_COMMON_DIR = Path(__file__).parent.parent / "common"
+if str(_COMMON_DIR) not in sys.path:
+    sys.path.insert(0, str(_COMMON_DIR))
+from property_types import standardize_property_type
 
 BASE = "https://gis.vgsi.com/{town}/Parcel.aspx?Pid={pid}"
 HEADERS = {"User-Agent": "ValueGap research tool (personal project, low volume)"}
 
 FIELDNAMES = ["pid", "location", "total_market_value", "mblu", "acres", "land_use_desc", "match_source"]
-
-# Different towns' VGSI installs use different vocabulary for the same
-# underlying property-type concept -- discovered when Lebanon's raw values
-# ('ONE FAM', 'RES LAND', '2 FAMILY') turned out to share nothing in common
-# with Lincoln's ('Single Family', 'Vacant Land', 'Two Family'), silently
-# breaking every type-eligibility check downstream in find_abutters.py and
-# compute_gap.py, since those are hardcoded to specific strings. Standardized
-# HERE, at scrape time -- the earliest point land_use_desc exists at all
-# (GRANIT never has this field, only numeric SLU/SLUC codes) -- so every
-# downstream file, and the raw CSV itself, only ever sees canonical values.
-#
-# Built from exactly two towns' data so far -- if a third town introduces
-# a new raw value not listed here, it's left UNCHANGED (not guessed at)
-# and will behave as an "unrecognized type" downstream (kept as a
-# candidate, not counted as a value comp) until someone adds it below.
-LAND_USE_STANDARDIZATION = {
-    # Lincoln, NH
-    "single family": "Single Family",
-    "two family": "Two Family",
-    "vacant land": "Vacant Land",
-    "vacant - pot dev": "Vacant Land",
-    "vacant": "Vacant Land",
-    "condo - no land": "Condo",
-    "common land": "Common Land",
-    "mobile home": "Mobile Home",
-    "commercial": "Commercial",
-    "store/shop": "Commercial",
-    "office bld": "Commercial",
-    "motels": "Commercial",
-    "town - comm": "Municipal",
-    "vac w/ ob": "Vacant Land with Outbuilding",
-    "res  pud": "Residential PUD",
-    # Lebanon, NH
-    "one fam": "Single Family",
-    "one fam w acc": "Single Family",
-    "2 family": "Two Family",
-    "3 family": "Three Family",
-    "res land": "Vacant Land",
-    "condo": "Condo",
-    "condo-vac": "Condo",
-    "municpal": "Municipal",  # sic -- this is VGSI's own spelling, missing the "I"
-    "municpal-comm": "Municipal",
-    "state nh": "Municipal",
-    "charitable": "Municipal",
-    "potnldev": "Vacant Land",
-    "undev": "Vacant Land",
-    "dev land": "Vacant Land",
-    "day care": "Commercial",
-    "medical off-res": "Commercial",
-    "office": "Commercial",
-    "store": "Commercial",
-    "commwhse": "Commercial",
-    "condo-com": "Commercial",
-    "rest/bar": "Commercial",
-    "condo ind": "Commercial",
-    "mobil hm": "Mobile Home",
-    "camper": "Camper",
-    "apt 4-8": "Multi-Family",
-    "apt 9+up": "Multi-Family",
-    "mult hs": "Multi-Family",
-    "pud": "Residential PUD",
-    "open space": "Open Space",
-    "out blds": "Vacant Land with Outbuilding",
-    "other rec": "Recreational",
-    "farm rec": "Recreational",
-    "farm": "Farm",
-    # "other" deliberately NOT mapped -- too ambiguous to guess a category
-    # for; left as raw text, which behaves as "unrecognized" downstream.
-}
 
 # Same suffix-abbreviation convention as join_parcels_assessments.py's
 # normalize_address, duplicated here (rather than imported) so this script
@@ -143,10 +88,10 @@ def normalize_address(raw: str) -> str:
 
 
 def standardize_land_use(raw: str | None) -> str | None:
-    if raw is None:
-        return None
-    key = raw.strip().lower()
-    return LAND_USE_STANDARDIZATION.get(key, raw)  # unrecognized -> left as-is, not guessed at
+    """Thin alias kept so parse_parcel() below doesn't need to change --
+    the real implementation now lives in spiders/common/property_types.py
+    and is shared with every other state spider."""
+    return standardize_property_type(raw)
 
 
 def parse_parcel(html: str) -> dict | None:
