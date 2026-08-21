@@ -2,7 +2,13 @@ package com.oncoord.propertyscout.valuegap;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.oncoord.propertyscout.geo.ParcelGeometryUtils;
 import com.oncoord.propertyscout.model.PropertyType;
+import org.locationtech.jts.geom.MultiPolygon;
+import org.locationtech.jts.geom.Polygon;
+import org.locationtech.jts.io.WKTReader;
+import org.locationtech.jts.geom.Geometry;
+import org.locationtech.jts.geom.Point;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -108,12 +114,14 @@ public class NearbyCompsService {
             if (!isPlausibleSize(computedAcres, expectedAcres)) {
                 return Optional.empty();
             }
+            Double storedAcres = (Double) rs.getObject("acreage");
+            Double effectiveAcres = storedAcres != null ? storedAcres : computedAcres;
             return Optional.of(new TargetParcel(
                     rs.getString("property_id"),
                     rs.getString("geom_wkt"),
                     rs.getString("geom_geojson"),
                     rs.getString("address"),
-                    (Double) rs.getObject("acreage"),
+                    effectiveAcres,
                     (Double) rs.getObject("assessed_value"),
                     PropertyType.fromValue(rs.getString("property_type"))
             ));
@@ -132,21 +140,6 @@ public class NearbyCompsService {
         return findComps(target, targetIsLand, DEFAULT_CLOSE_RADIUS_M, DEFAULT_FAR_RADIUS_M, DEFAULT_LOT_SIZE_RATIO_TOLERANCE);
     }
 
-    /**
-     * Stage A (gather) + Stage B (filter), same two-pass structure as
-     * find_abutters.py:
-     *   A. a candidate is anything that's geometrically touching (within
-     *      TOUCH_TOLERANCE_M), OR within closeRadiusM with a similar lot
-     *      size, OR within farRadiusM on the same normalized street name.
-     *   B. every candidate from A is then filtered uniformly: blank address
-     *      excluded; lot size must be comparable to the target UNLESS the
-     *      target itself is Land (a land listing's own acreage isn't what
-     *      matters -- what matters is what the neighborhood supports);
-     *      a known non-comparable type (present but not in
-     *      COMP_ELIGIBLE_TYPES) is excluded, but a genuinely missing type
-     *      (raw column is null) is kept and tagged unverified rather than
-     *      guessed away.
-     */
     public List<CompCandidate> findComps(
             TargetParcel target,
             boolean targetIsLand,
@@ -160,6 +153,7 @@ public class NearbyCompsService {
         SELECT property_id, address, city, property_type, assessed_value, acreage,
                latitude, longitude,
                ST_AsGeoJSON(geometry) AS geom_geojson,
+               ST_AsText(geometry) AS geom_wkt,
                ST_Distance(geometry::geography, ST_GeomFromText(?, 4326)::geography) AS distance_m,
                ST_DWithin(geometry::geography, ST_GeomFromText(?, 4326)::geography, ?) AS touches
         FROM property_values
@@ -171,6 +165,17 @@ public class NearbyCompsService {
         List<CompCandidate> candidates = new ArrayList<>();
         String wkt = target.getGeometryWkt();
 
+        WKTReader wktReader = new WKTReader();
+        Geometry targetGeom;
+        try {
+            targetGeom = wktReader.read(wkt);
+        } catch (Exception e) {
+            return candidates; // target's own WKT should always parse
+        }
+        Point targetCentroid = targetGeom.getCentroid();
+        double targetLat = targetCentroid.getY();
+        double targetLon = targetCentroid.getX();
+
         jdbcTemplate.query(sql, rs -> {
             double distanceMeters = rs.getDouble("distance_m");
             boolean touches = rs.getBoolean("touches");
@@ -178,6 +183,41 @@ public class NearbyCompsService {
             String address = rs.getString("address");
             String rawPropertyType = rs.getString("property_type");
             PropertyType propertyType = PropertyType.fromValue(rawPropertyType);
+            String propertyId = rs.getString("property_id");
+
+            String candidateWkt = rs.getString("geom_wkt");
+            Geometry candidateGeom = null;
+            if (candidateWkt != null) {
+                try {
+                    candidateGeom = wktReader.read(candidateWkt);
+                } catch (Exception e) {
+                    // leave null -- quality checks below are skipped for this row
+                }
+            }
+
+            JsonNode geometry = null;
+            String geomGeoJson = rs.getString("geom_geojson");
+            if (geomGeoJson != null) {
+                try {
+                    geometry = objectMapper.readTree(geomGeoJson);
+                } catch (Exception e) {
+                    // leave null
+                }
+            }
+            if (candidateGeom != null) {
+                if (!(candidateGeom instanceof Polygon) && !(candidateGeom instanceof MultiPolygon)) {
+                    return; // not a real parcel shape -- a bare Point or similar
+                }
+                if (ParcelGeometryUtils.countMultiPoly(candidateGeom) > 2) {
+                    return;
+                }
+                if (ParcelGeometryUtils.countHoles(candidateGeom) > 2) {
+                    return;
+                }
+                if (ParcelGeometryUtils.furthestPointDistanceM(candidateGeom, targetLat, targetLon) > 500.0) {
+                    return;
+                }
+            }
 
             Set<String> foundVia = new HashSet<>();
             if (touches) {
@@ -199,27 +239,16 @@ public class NearbyCompsService {
             if (address == null || address.isBlank()) {
                 return;
             }
-            if (!targetIsLand && !ValueGapUtils.lotSizeSimilar(target.getAcres(), acres, lotSizeRatioTolerance)) {
+            if (!ValueGapUtils.lotSizeSimilar(target.getAcres(), acres, lotSizeRatioTolerance)) {
                 return;
             }
-
             if (rawPropertyType != null && !COMP_ELIGIBLE_TYPES.contains(propertyType)) {
                 return;
             }
             Boolean compEligible = rawPropertyType == null ? null : COMP_ELIGIBLE_TYPES.contains(propertyType);
 
-            JsonNode geometry = null;
-            String geomGeoJson = rs.getString("geom_geojson");
-            if (geomGeoJson != null) {
-                try {
-                    geometry = objectMapper.readTree(geomGeoJson);
-                } catch (Exception e) {
-                    // leave null -- frontend falls back to point rendering for this candidate
-                }
-            }
-
             candidates.add(new CompCandidate(
-                    rs.getString("property_id"),
+                    propertyId,
                     address,
                     rs.getString("city"),
                     propertyType,
