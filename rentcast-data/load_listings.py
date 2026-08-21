@@ -27,7 +27,7 @@ Requires: psycopg2 (pip install psycopg2-binary), and schema.sql (with
 the listings table, see listings_schema.sql) already applied.
 
 Usage:
-python load_listings.py nh_data/lincoln_sfh_land.json --dsn "postgresql://oncoord:oncoord-pg1@localhost:5432/property-scout"
+python load_listings.py nh_data/nh_lincoln_sfh_land.json --dsn "postgresql://oncoord:<pw>@localhost:5432/property-scout"
 python load_listings.py rentcast_data/ --dsn "postgresql://..."  # directory of files,
                                                                  # non-recursive, same
                                                                  # convention as
@@ -212,9 +212,20 @@ def _check_schema_exists(conn):
 
 
 def main():
+    if len(sys.argv) == 1:
+        print("Usage:")
+        print("  python load_listings.py <file-or-directory> --dsn \"<postgresql-dsn>\"")
+        print()
+        print("Example:")
+        print('  python load_listings.py nh_data/nh_lincoln_sfh_land.json --dsn "postgresql://oncoord:<pw>@localhost:5432/property-scout"')
+        sys.exit(1)
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("files", nargs="+", help="RentCast JSON/GeoJSON file(s) and/or "
-                                                    "directory/directories (non-recursive)")
+    parser.add_argument(
+        "files",
+        nargs="+",
+        help="RentCast JSON/GeoJSON file(s) and/or directory/directories (non-recursive)"
+    )
     parser.add_argument("--dsn", required=True)
     args = parser.parse_args()
 
@@ -222,6 +233,7 @@ def main():
     if not paths:
         print("ERROR: no .json/.geojson files found across the given path(s).")
         sys.exit(1)
+
     print(f"Loading {len(paths)} file(s)...")
 
     conn = psycopg2.connect(args.dsn)
