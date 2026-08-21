@@ -44,6 +44,18 @@ Planning_Region IS a real, confirmed field, but it's a different concept
 rather than treated as equivalent, though the raw field is available in
 the source data if a future decision is made to use it anyway.
 
+property_type: State_Use_Description is passed through
+spiders/common/property_types.py's standardize_property_type() -- same
+shared mapping NH and MA use. NONE of CT's actual State_Use_Description
+values are in that CSV yet (no live run's real values have been
+confirmed for this field the way Town_Name/Location_1/etc. were) -- so
+until real values are seen and added, every CT property_type will come
+back UNCHANGED (raw CT text), same as any other unrecognized value.
+The "[schema check]" diagnostic below only prints field NAMES, not
+values -- to find CT's actual State_Use_Description values, inspect a
+few real output records after a run (or print attrs.get(
+"State_Use_Description") directly during one), then add rows to the CSV.
+
 Usage:
     python -m spiders.ct_spider "Bristol" "New Haven" --out data/
 """
@@ -56,6 +68,7 @@ import urllib.request
 import urllib.parse
 
 from ..common.base import StateSpider, SpiderError
+from ..common.property_types import standardize_property_type
 
 BASE_QUERY_URL = (
     "https://services3.arcgis.com/3FL1kr7L4LvwA2Kb/arcgis/rest/services/"
@@ -267,7 +280,7 @@ class CTSpider(StateSpider):
             "bedrooms": _num(attrs, "Number_of_Bedroom"),
             "bathrooms": _combined_bathrooms(attrs),
             "year_built": _num(attrs, "ayb"),  # "actual year built" -- standard CAMA abbreviation
-            "property_type": attrs.get("State_Use_Description"),
+            "property_type": standardize_property_type(attrs.get("State_Use_Description")),
             "source": SOURCE_TAG,
             "source_url": BASE_QUERY_URL,
             "source_date": date.today().isoformat(),
