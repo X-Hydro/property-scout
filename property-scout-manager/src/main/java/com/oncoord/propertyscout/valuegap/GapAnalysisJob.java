@@ -34,6 +34,15 @@ public class GapAnalysisJob {
     private volatile String currentCity;
     private volatile Map<String, Object> result;
     private volatile String errorMessage;
+    private volatile boolean cancelRequested = false;
+
+    public void requestCancel() {
+        cancelRequested = true;
+    }
+
+    public boolean isCancelRequested() {
+        return cancelRequested;
+    }
 
     public GapAnalysisJob(int total, int totalCities) {
         this.total = total;

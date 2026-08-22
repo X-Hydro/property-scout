@@ -126,6 +126,13 @@ public class GapAnalysisJobService {
         return jobs.get(jobId);
     }
 
+    public void requestCancel(String jobId) {
+        GapAnalysisJob job = jobs.get(jobId);
+        if (job != null) {
+            job.requestCancel();
+        }
+    }
+
     private void runJob(GapAnalysisJob job, List<Listing> listings, Integer limit,
                         Map<String, AtomicInteger> remainingPerCity) {
         // Own worker pool per job run (not the same pool startJob's task
@@ -140,6 +147,7 @@ public class GapAnalysisJobService {
             List<CompletableFuture<Void>> futures = new ArrayList<>(listings.size());
             for (Listing listing : listings) {
                 futures.add(CompletableFuture.runAsync(() -> {
+                    if (job.isCancelRequested()) return;
                     pipelineService.computeForListing(listing).ifPresent(results::add);
                     job.recordProgress(listing.getCity());
 

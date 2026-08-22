@@ -121,8 +121,7 @@ public class ValueGapController {
      * Deliberately NOT logged -- the frontend polls this every ~1s per
      * running job (see JOB_POLL_INTERVAL_MS in property-scout.js), so
      * logging every call here would drown out everything else in the logs
-     * for the whole duration of a run. GapAnalysisJobService already logs
-     * progress milestones and the final outcome from the job side instead.
+     * for the whole duration of a run.
      */
     @GetMapping("/rank/jobs/{jobId}")
     public ResponseEntity<Map<String, Object>> getRankJobStatus(@PathVariable String jobId) {
@@ -144,5 +143,10 @@ public class ValueGapController {
             body.put("error", job.getErrorMessage());
         }
         return ResponseEntity.ok(body);
+    }
+
+    @PostMapping("/rank/jobs/{jobId}/cancel")
+    public void cancelRankJob(@PathVariable String jobId) {
+        jobService.requestCancel(jobId);
     }
 }
