@@ -7,6 +7,8 @@ import com.oncoord.propertyscout.valuegap.GapAnalysisJobService;
 import com.oncoord.propertyscout.valuegap.GapRankingService;
 import com.oncoord.propertyscout.valuegap.GapResult;
 import com.oncoord.propertyscout.valuegap.ValueGapPipelineService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -17,6 +19,8 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/value-gap")
 public class ValueGapController {
+
+    private static final Logger log = LoggerFactory.getLogger(ValueGapController.class);
 
     private final ListingsService listingsService;
     private final ValueGapPipelineService pipelineService;
@@ -65,10 +69,18 @@ public class ValueGapController {
             @RequestParam(required = false) String propertyType,
             @RequestParam(required = false) Integer limit) {
 
+        long startedAt = System.currentTimeMillis();
         List<Listing> listings = listingsService.findListings(state, city, zipCode, propertyType);
+        log.info("Synchronous /rank: state={} city={} zipCode={} propertyType={} limit={} -> {} listings",
+                state, city, zipCode, propertyType, limit, listings.size());
+
         GapRankingService.RankedGaps ranked = pipelineService.rankListings(listings);
         Map<String, List<GapResult>> rankedByPropertyType =
                 GapRankingService.applyLimit(ranked.getRankedByPropertyType(), limit);
+
+        long elapsedMs = System.currentTimeMillis() - startedAt;
+        log.info("Synchronous /rank completed in {} ms for state={} city={} ({} listings)",
+                elapsedMs, state, city, listings.size());
 
         return Map.of(
                 "rankedByPropertyType", rankedByPropertyType,
@@ -92,6 +104,8 @@ public class ValueGapController {
             @RequestParam(required = false) Integer limit) {
 
         List<Listing> listings = listingsService.findListings(state, city, zipCode, propertyType);
+        log.info("Async /rank/jobs request: state={} city={} zipCode={} propertyType={} limit={} -> {} listings",
+                state, city, zipCode, propertyType, limit, listings.size());
         String jobId = jobService.startJob(listings, limit);
         return Map.of("jobId", jobId);
     }
@@ -103,6 +117,12 @@ public class ValueGapController {
      * includes "error". 404 if jobId is unknown (never existed -- there's
      * no TTL/eviction yet, so an id that once existed stays valid for the
      * life of the server process).
+     *
+     * Deliberately NOT logged -- the frontend polls this every ~1s per
+     * running job (see JOB_POLL_INTERVAL_MS in property-scout.js), so
+     * logging every call here would drown out everything else in the logs
+     * for the whole duration of a run. GapAnalysisJobService already logs
+     * progress milestones and the final outcome from the job side instead.
      */
     @GetMapping("/rank/jobs/{jobId}")
     public ResponseEntity<Map<String, Object>> getRankJobStatus(@PathVariable String jobId) {
@@ -115,6 +135,8 @@ public class ValueGapController {
         body.put("status", job.getStatus().name());
         body.put("processed", job.getProcessed());
         body.put("total", job.getTotal());
+        body.put("citiesProcessed", job.getCitiesProcessed());
+        body.put("totalCities", job.getTotalCities());
         body.put("currentCity", job.getCurrentCity());
         if (job.getStatus() == GapAnalysisJob.Status.COMPLETED) {
             body.put("result", job.getResult());
