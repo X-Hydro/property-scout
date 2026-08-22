@@ -14,7 +14,7 @@ public class GapResult {
     private final List<CompCandidate> candidates;
 
     private final boolean hasComps;
-    private final List<Double> comps;
+    private final List<CompCandidate> comps;
     private final Double compMedian;
     private final Double compMin;
     private final Double compMax;
@@ -33,7 +33,7 @@ public class GapResult {
             double price, Double targetAssessedValue,
             Double targetLatitude, Double targetLongitude, com.fasterxml.jackson.databind.JsonNode targetGeometry,
             boolean targetIsLand,
-            List<CompCandidate> candidates, boolean hasComps, List<Double> comps,
+            List<CompCandidate> candidates, boolean hasComps, List<CompCandidate> comps,
             Double compMedian, Double compMin, Double compMax, Double gap, Double gapPct) {
         this.listingId = listingId;
         this.address = address;
@@ -95,7 +95,7 @@ public class GapResult {
         return hasComps;
     }
 
-    public List<Double> getComps() {
+    public List<CompCandidate> getComps() {
         return comps;
     }
 

@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Replaces GapAnalysisJobService/GapAnalysisJob for this project's actual
@@ -85,16 +86,6 @@ public class GapRecomputeService {
         return new RecomputeSummary(listings.size(), results.size(), hasCompsCount);
     }
 
-    /**
-     * comp_property_ids is deliberately left null for now -- see the note
-     * that used to live on GapAnalysisJobService.persistResults:
-     * GapResult.getComps() returns List<Double> (raw assessed values used
-     * in the median) with no link back to which CompCandidate/property_id
-     * each value came from. getCandidates() has property_ids but is the
-     * BROADER pre-filter list, not the exact subset that fed the median.
-     * Needs a GapComputationService change (build comps as
-     * List<CompCandidate>, not List<Double>) to populate this correctly.
-     */
     private void persistResults(List<GapResult> results) {
         if (results.isEmpty()) {
             return;
@@ -102,8 +93,11 @@ public class GapRecomputeService {
         jdbcTemplate.execute((ConnectionCallback<Void>) con -> {
             List<Object[]> rows = new ArrayList<>();
             for (GapResult r : results) {
-                List<Double> comps = r.getComps();
+                List<CompCandidate> comps = r.getComps();
                 Integer compCount = comps != null ? comps.size() : null;
+                List<String> compPropertyIds = comps != null
+                        ? comps.stream().map(CompCandidate::getPropertyId).collect(Collectors.toList())
+                        : null;
                 rows.add(new Object[]{
                         r.getListingId(),
                         r.isHasComps(),
@@ -112,7 +106,7 @@ public class GapRecomputeService {
                         r.getCompMin(),
                         r.getCompMax(),
                         compCount,
-                        toSqlArray(con, null), // comp_property_ids -- see javadoc above
+                        toSqlArray(con, compPropertyIds),
                         r.getGap(),
                         r.getGapPct(),
                         r.getRelativeGapPct(),

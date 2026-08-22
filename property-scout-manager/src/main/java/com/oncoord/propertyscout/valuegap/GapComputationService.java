@@ -40,11 +40,10 @@ public class GapComputationService {
             List<CompCandidate> candidates) {
 
         boolean targetIsLand = "Land".equals(propertyType);
-
-        List<Double> comps = new ArrayList<>();
+        List<CompCandidate> comps = new ArrayList<>();
         for (CompCandidate c : candidates) {
             if (c.getPropertyType() == VALUE_COMP_TYPE && c.getAssessedValue() != null) {
-                comps.add(c.getAssessedValue());
+                comps.add(c);
             }
         }
 
@@ -56,13 +55,17 @@ public class GapComputationService {
             );
         }
 
-        Collections.sort(comps);
-        int n = comps.size();
+        List<Double> values = new ArrayList<>();
+        for (CompCandidate c : comps) {
+            values.add(c.getAssessedValue());
+        }
+        Collections.sort(values);
+        int n = values.size();
         double median = (n % 2 == 1)
-                ? comps.get(n / 2)
-                : (comps.get(n / 2 - 1) + comps.get(n / 2)) / 2.0;
-        double min = comps.get(0);
-        double max = comps.get(n - 1);
+                ? values.get(n / 2)
+                : (values.get(n / 2 - 1) + values.get(n / 2)) / 2.0;
+        double min = values.get(0);
+        double max = values.get(n - 1);
         double gap = median - price;
         double gapPct = (gap / price) * 100.0;
 
