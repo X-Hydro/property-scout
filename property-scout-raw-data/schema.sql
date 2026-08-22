@@ -112,3 +112,23 @@ CREATE TABLE IF NOT EXISTS listing_source_cache (
     last_hit_at     TIMESTAMPTZ NULL,
     CONSTRAINT uq_listing_source_cache_key UNIQUE (source, endpoint, request_key)
 );
+
+CREATE TABLE IF NOT EXISTS gap_results (
+    listing_id            TEXT PRIMARY KEY REFERENCES listings(listing_id),
+    has_comps             BOOLEAN NOT NULL,
+    target_assessed_value NUMERIC,
+    comp_median           NUMERIC,
+    comp_min              NUMERIC,
+    comp_max              NUMERIC,
+    comp_count            INTEGER,
+    comp_property_ids     TEXT[],
+    gap                   NUMERIC,
+    gap_pct               NUMERIC,
+    relative_gap_pct      NUMERIC,
+    computed_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ 
+-- Supports "top N by gap" queries directly -- WHERE has_comps ORDER BY gap DESC.
+CREATE INDEX IF NOT EXISTS idx_gap_results_gap
+    ON gap_results (gap DESC)
+    WHERE has_comps = true;
