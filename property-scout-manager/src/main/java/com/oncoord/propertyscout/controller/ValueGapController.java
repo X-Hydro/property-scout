@@ -51,14 +51,20 @@ public class ValueGapController {
      * what town" view, rather than every matching listing statewide.
      */
     @GetMapping("/rank")
-    public Map<String, Object> rankGaps(
+    public ResponseEntity<?> rankGaps(
             @RequestParam String state,
             @RequestParam(required = false) String city,
             @RequestParam(required = false) String zipCode,
             @RequestParam(required = false) String propertyType,
             @RequestParam(required = false) Integer limit) {
 
-        return recomputeService.findRanked(state, city, zipCode, propertyType, limit);
+        try {
+            return ResponseEntity.ok(recomputeService.findRanked(state, city, zipCode, propertyType, limit));
+        } catch (Exception e) {
+            log.error("Rank query failed: state={} city={}", state, city, e);
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("error", rootCauseMessage(e)));
+        }
     }
 
     /**
@@ -93,7 +99,15 @@ public class ValueGapController {
             // Full stack trace still goes to the server log either way.
             log.error("Recompute failed: state={} city={}", state, city, e);
             return ResponseEntity.internalServerError()
-                    .body(Map.of("error", e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+                    .body(Map.of("error", rootCauseMessage(e)));
         }
+    }
+
+    private static String rootCauseMessage(Throwable e) {
+        Throwable cause = e;
+        while (cause.getCause() != null && cause.getCause() != cause) {
+            cause = cause.getCause();
+        }
+        return cause.getMessage() != null ? cause.getMessage() : cause.getClass().getSimpleName();
     }
 }

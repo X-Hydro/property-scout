@@ -80,6 +80,16 @@ public class GapRecomputeService {
             pipelineService.computeForListing(listing).ifPresent(results::add);
         }
 
+        // rank() sets relativeGapPct on each result as a side effect
+        // (group-relative to gapPct within its property type) -- the
+        // grouped/sorted return value itself isn't needed here (findRanked
+        // does its own grouping at read time straight from the DB), but
+        // without this call relativeGapPct silently stays null forever,
+        // since nothing else ever calls the setter. That's exactly what
+        // was happening before this fix -- relative_gap_pct has been NULL
+        // for every persisted row.
+        gapRankingService.rank(results);
+
         int hasCompsCount = (int) results.stream().filter(GapResult::isHasComps).count();
         persistResults(results);
 
@@ -139,9 +149,9 @@ public class GapRecomputeService {
                 FROM gap_results g
                 JOIN listings l ON l.listing_id = g.listing_id
                 WHERE l.state = ?
-                  AND (? IS NULL OR l.city = ?)
-                  AND (? IS NULL OR l.zip_code = ?)
-                  AND (? IS NULL OR l.property_type = ?)
+                  AND (?::text IS NULL OR l.city = ?)
+                  AND (?::text IS NULL OR l.zip_code = ?)
+                  AND (?::text IS NULL OR l.property_type = ?)
                   AND g.has_comps = true
                 ORDER BY l.property_type, g.gap DESC
                 """;
