@@ -59,6 +59,33 @@ public class GapRankingService {
         return new RankedGaps(byType, noComps);
     }
 
+    /**
+     * Truncates each property-type group to its top `limit` results (by
+     * gap, largest first). Applied AFTER rank() -- gap has to be computed
+     * for every matching listing regardless of limit, since there's no
+     * cheap proxy for "biggest gap" other than actually running the comp
+     * analysis; this only trims what gets serialized in the response, for
+     * callers like a statewide "biggest gaps, don't care what town" view
+     * where returning every matching listing isn't the point.
+     *
+     * A null limit is a no-op (returns the input map as-is) -- existing
+     * city-scoped callers that don't pass limit keep today's behavior
+     * (every matching listing returned) unchanged.
+     */
+    public static Map<String, List<GapResult>> applyLimit(
+            Map<String, List<GapResult>> rankedByPropertyType, Integer limit) {
+        if (limit == null) {
+            return rankedByPropertyType;
+        }
+        Map<String, List<GapResult>> limited = new LinkedHashMap<>();
+        for (Map.Entry<String, List<GapResult>> entry : rankedByPropertyType.entrySet()) {
+            List<GapResult> group = entry.getValue();
+            limited.put(entry.getKey(),
+                    group.size() > limit ? new ArrayList<>(group.subList(0, limit)) : group);
+        }
+        return limited;
+    }
+
     private void addRelativeGap(List<GapResult> group) {
         if (group.isEmpty()) {
             return;
