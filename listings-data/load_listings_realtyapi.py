@@ -59,7 +59,7 @@ from pathlib import Path
 from datetime import date
 
 # Reuse the DB write path and schema check -- do not duplicate the SQL here.
-from load_listings import upsert_listings, _check_schema_exists, _iso_date_only, _expand_paths
+from listings_db import upsert_listings, _check_schema_exists, _iso_date_only, _expand_paths
 
 REALTYAPI_BASE = "https://realtor.realtyapi.io"
 

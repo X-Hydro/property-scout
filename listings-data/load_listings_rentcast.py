@@ -39,45 +39,10 @@ import json
 import argparse
 from pathlib import Path
 from datetime import date
-import psycopg2
-import psycopg2.extras
 
-COLUMNS = [
-    "formatted_address", "address_line_1", "address_line_2", "city", "state",
-    "zip_code", "county", "latitude", "longitude", "property_type", "bedrooms",
-    "bathrooms", "square_footage", "lot_size", "year_built", "status", "price",
-    "listing_type", "listed_date", "removed_date", "days_on_market",
-    "mls_name", "mls_number", "agent", "office", "price_history", "source",
-]
-
-UPSERT_SQL = f"""
-INSERT INTO listings (listing_id, {", ".join(COLUMNS)}, geometry)
-VALUES %s
-ON CONFLICT (listing_id) DO UPDATE SET
-    {", ".join(f"{c} = EXCLUDED.{c}" for c in COLUMNS)},
-    geometry = EXCLUDED.geometry,
-    fetched_at = now()
-"""
-
-# lat/lon can be NULL for a listing RentCast couldn't geocode -- guard
-# the point-geometry expression so those rows still load (with a NULL
-# geometry) instead of failing the whole batch.
-ROW_TEMPLATE = (
-    "(%(listing_id)s, " + ", ".join(f"%({c})s" for c in COLUMNS) +
-    ", CASE WHEN %(longitude)s IS NOT NULL AND %(latitude)s IS NOT NULL "
-    "THEN ST_SetSRID(ST_MakePoint(%(longitude)s, %(latitude)s), 4326) END)"
-)
-
-
-def _iso_date_only(raw) -> str | None:
-    """RentCast dates come as full ISO datetimes ('2025-10-01T00:00:00.000Z')
-    -- the listings table's date columns just want the date portion."""
-    if not raw:
-        return None
-    try:
-        return str(raw).split("T")[0]
-    except AttributeError:
-        return None
+# Shared write path -- do not duplicate this here. See listings_db.py's
+# docstring: every provider loader imports from it as an equal.
+from listings_db import upsert_listings, _check_schema_exists, _iso_date_only, _expand_paths
 
 
 def _listing_dict_from_raw(raw: dict) -> dict:
@@ -146,69 +111,6 @@ def parse_listings_file(path: str) -> list[dict]:
     if isinstance(data, dict):
         return [_listing_dict_from_raw(data)]
     raise ValueError(f"{path}: unrecognized JSON shape (expected FeatureCollection, array, or object)")
-
-
-def upsert_listings(conn, listings: list[dict]) -> int:
-    """
-    Reusable write path -- call this from the future live lazy-load
-    service too (after its own RentCast API fetch), not just from this
-    CLI, so the upsert logic only exists in one place.
-    """
-    if not listings:
-        return 0
-
-    no_id = sum(1 for r in listings if not r.get("listing_id"))
-    if no_id:
-        print(f"  WARNING: {no_id}/{len(listings)} listings have no listing_id -- "
-              f"skipped (listing_id is the primary key)")
-        listings = [r for r in listings if r.get("listing_id")]
-
-    # Same defensive last-value-wins de-dup as load_property_values.py --
-    # a duplicate key within one batch would otherwise crash the whole
-    # upsert (Postgres can't ON CONFLICT DO UPDATE the same row twice in
-    # one statement).
-    seen = {}
-    for r in listings:
-        seen[r["listing_id"]] = r
-    if len(seen) < len(listings):
-        print(f"  WARNING: {len(listings) - len(seen)} duplicate listing_id row(s) "
-              f"collapsed via last-value-wins")
-    rows = list(seen.values())
-
-    with conn.cursor() as cur:
-        psycopg2.extras.execute_values(cur, UPSERT_SQL, rows, template=ROW_TEMPLATE, page_size=500)
-    conn.commit()
-    return len(rows)
-
-
-def _expand_paths(paths: list[str]) -> list[str]:
-    """Same convention as load_property_values.py: directories expand to
-    their files directly inside them, never recursing into subdirectories
-    (so a folder like rentcast_data/bad/ stays excluded)."""
-    expanded = []
-    for p in paths:
-        path = Path(p)
-        if path.is_dir():
-            found = sorted(path.glob("*.json")) + sorted(path.glob("*.geojson"))
-            if not found:
-                print(f"  WARNING: {p} is a directory with no *.json/*.geojson files "
-                      f"directly inside it")
-            expanded.extend(str(f) for f in found)
-        elif path.is_file():
-            expanded.append(str(path))
-        else:
-            print(f"  WARNING: {p} does not exist -- skipped")
-    return expanded
-
-
-def _check_schema_exists(conn):
-    with conn.cursor() as cur:
-        cur.execute("SELECT to_regclass('public.listings')")
-        exists = cur.fetchone()[0] is not None
-    if not exists:
-        print("ERROR: 'listings' table doesn't exist. Run listings_schema.sql first:\n"
-              "  psql -d <dbname> -f listings_schema.sql")
-        sys.exit(1)
 
 
 def main():
