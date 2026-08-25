@@ -93,24 +93,39 @@ fi
 echo "${SCOPE_LABEL}: ${TOTAL} total active Single Family|Land listings"
 echo "  -> ${PAGES_NEEDED} request(s) needed at limit=${LIMIT} (1 already made)"
 
+# Cap at QUOTA_WARNING_THRESHOLD requests (LIMIT * QUOTA_WARNING_THRESHOLD
+# listings) rather than aborting -- page 1 is already spent either way, so
+# grab as many of the remaining pages as the monthly quota allows instead
+# of throwing that first request away on an all-or-nothing exit.
+PAGES_TO_FETCH=$PAGES_NEEDED
 if [ "$PAGES_NEEDED" -gt "$QUOTA_WARNING_THRESHOLD" ]; then
+    PAGES_TO_FETCH=$QUOTA_WARNING_THRESHOLD
+    CAPPED_TOTAL=$((LIMIT * QUOTA_WARNING_THRESHOLD))
     echo "" >&2
-    echo "WARNING: ${PAGES_NEEDED} total requests exceeds your ${QUOTA_WARNING_THRESHOLD}/month" >&2
-    echo "free-tier allowance. Stopping after page 1 -- page 1's data is still" >&2
-    echo "saved in ${DATA_DIR}/. Narrow the query (e.g. drop Land, or add a" >&2
-    echo "daysOld filter) or upgrade your plan before fetching the rest." >&2
-    exit 1
+    echo "WARNING: ${PAGES_NEEDED} request(s) would be needed for all ${TOTAL} listings," >&2
+    echo "exceeding your ${QUOTA_WARNING_THRESHOLD}/month free-tier allowance." >&2
+    echo "Capping at ${QUOTA_WARNING_THRESHOLD} request(s) (${CAPPED_TOTAL} listings) instead." >&2
+    echo "Narrow the query (e.g. drop Land, or add a daysOld filter) or upgrade" >&2
+    echo "your plan to fetch the remaining $((TOTAL - CAPPED_TOTAL)) listings." >&2
 fi
 
 OFFSET=$LIMIT
 PAGE=2
-while [ "$OFFSET" -lt "$TOTAL" ]; do
+while [ "$OFFSET" -lt "$TOTAL" ] && [ "$PAGE" -le "$PAGES_TO_FETCH" ]; do
     echo "Fetching page ${PAGE} (offset=${OFFSET})..."
     fetch_page "$OFFSET" "$PAGE" false
     OFFSET=$((OFFSET + LIMIT))
     PAGE=$((PAGE + 1))
 done
 
+DOWNLOADED=$(( (PAGE - 1) * LIMIT ))
+if [ "$DOWNLOADED" -gt "$TOTAL" ]; then
+    DOWNLOADED=$TOTAL
+fi
+
 echo ""
-echo "Done: ${DATA_DIR}/ now has $((PAGE - 1)) page file(s), ${TOTAL} listings total."
+echo "Done: ${DATA_DIR}/ now has $((PAGE - 1)) page file(s), ${DOWNLOADED} of ${TOTAL} listings downloaded."
 echo "Used $((PAGE - 1)) API request(s) out of your monthly quota."
+if [ "$DOWNLOADED" -lt "$TOTAL" ]; then
+    echo "NOTE: stopped at the ${QUOTA_WARNING_THRESHOLD}-request/month quota cap -- $((TOTAL - DOWNLOADED)) listing(s) not downloaded."
+fi

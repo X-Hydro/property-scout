@@ -7,6 +7,37 @@ by walking a town's Vision Government Solutions (VGSI) parcel record pages
 directly, which is what most NH/VT/MA/CT towns use for public assessment
 lookup.
 
+BROKEN THEN FIXED (2026-08-25): VGSI redesigned their parcel page layout
+at some point between the original build and now -- CONFIRMED via a real
+pasted page (Amherst, NH, PID 1, 135 Amherst St #18). This broke every
+single page fetch, not just new towns: parse_parcel()'s very first check
+gated on finding the literal text "Total Market Value" anywhere on the
+page, and that string no longer appears at all under the new layout. The
+total assessed value moved to a field simply labeled "Assessment" --
+appears once near the top of the page (right after Owner, before PID:
+"Assessment\n$442,900"), and again as the "Total" column of a
+"Valuation Year | Improvements | Land | Total" table further down
+("Current Value" section). Confirmed via the real sample that the FIRST
+occurrence of "Assessment" in the page text is immediately followed by
+the dollar figure, in the same shape grab() already expects -- so the
+fix is a label-name swap, not a restructure of the parsing approach.
+
+The validity gate (deciding "is this a real parcel page, not a blank/
+error page") also had to move off "Total Market Value" for the same
+reason -- now gates on "PID" being present instead, which is confirmed
+present on the real sample and was already being grabbed separately
+before this fix (grab("PID", ...)).
+
+NOT YET RE-CONFIRMED against the new layout (the pasted sample didn't
+include this far down the page): Mblu, Land Use/Description section,
+Size (Acres). Left AS-IS below on the assumption the redesign was
+scoped to the assessment-value section specifically (Location/Mblu/
+Owner/PID all still matched the OLD assumed positions/labels in the
+real sample) -- but this is an assumption, not a confirmation. If
+land_use_desc or acres start coming back consistently empty across a
+real run post-fix, that's the signal this assumption was wrong and
+those need the same treatment total_market_value just got.
+
 TWO-PASS DESIGN:
   Pass 1 (sequential): walk PIDs 1..pid_end. Cheap, doesn't depend on
   address data quality, catches the bulk of a town's normal-range parcels.
@@ -99,9 +130,13 @@ def parse_parcel(html: str) -> dict | None:
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text(separator="\n")
 
-    # A PID with no valid parcel typically redirects to a blank/error page --
-    # bail out if the page doesn't look like a real record.
-    if "Total Market Value" not in text:
+    # FIXED 2026-08-25: was gated on "Total Market Value", which no
+    # longer appears anywhere under VGSI's redesigned layout (confirmed
+    # via a real pasted page -- see module docstring). "PID" is a label
+    # still confirmed present on a real parcel page and was already
+    # being grabbed separately below -- a blank/error page (invalid PID)
+    # still won't have it.
+    if "PID" not in text:
         return None
 
     def grab(label: str, pattern: str = r"\$?([\d,]+)"):
@@ -118,9 +153,10 @@ def parse_parcel(html: str) -> dict | None:
     # The Land Use section has a "Description" field (e.g. "Single Family",
     # "Residential Land") -- this is the assessor's own plain-English
     # classification, confirmed against PID 3813 (Description: Single
-    # Family). Scope the search to start after the "Land Use" heading so we
-    # don't accidentally grab an unrelated "Description" label elsewhere on
-    # the page.
+    # Family) UNDER THE OLD LAYOUT. NOT yet re-confirmed against the new
+    # layout (see module docstring) -- left as-is on the assumption this
+    # section is unchanged, revisit if land_use_desc comes back empty at
+    # scale post-fix.
     land_use_section = text.split("Land Use", 1)
     land_use_desc = None
     if len(land_use_section) > 1:
@@ -129,7 +165,15 @@ def parse_parcel(html: str) -> dict | None:
             land_use_desc = standardize_land_use(desc_m.group(1).strip())
     return {
         "location": location_m.group(1).strip() if location_m else None,
-        "total_market_value": grab("Total Market Value"),
+        # FIXED 2026-08-25: was grab("Total Market Value") -- CONFIRMED
+        # via the real Amherst sample that the total assessed value is
+        # now labeled just "Assessment", and the FIRST occurrence in the
+        # page text (right after Owner, before PID) is immediately
+        # followed by the dollar figure in the same shape grab() already
+        # expects. The second "Assessment" occurrence (the "Current
+        # Value" section header) is followed by table headers, not a
+        # dollar figure, so it won't false-match here.
+        "total_market_value": grab("Assessment"),
         "pid": grab("PID", r"(\d+)"),
         "mblu": grab("Mblu", r"([\d/ ]+)"),
         "land_use_desc": land_use_desc,

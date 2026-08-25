@@ -275,4 +275,40 @@ public class Listing {
     public void setFetchedAt(OffsetDateTime fetchedAt) {
         this.fetchedAt = fetchedAt;
     }
+
+
+    @Override
+    public String toString() {
+        return "Listing{" +
+                "listingId='" + listingId + '\'' +
+                ", formattedAddress='" + formattedAddress + '\'' +
+                ", addressLine1='" + addressLine1 + '\'' +
+                ", addressLine2='" + addressLine2 + '\'' +
+                ", city='" + city + '\'' +
+                ", state='" + state + '\'' +
+                ", zipCode='" + zipCode + '\'' +
+                ", county='" + county + '\'' +
+                ", latitude=" + latitude +
+                ", longitude=" + longitude +
+                ", propertyType='" + propertyType + '\'' +
+                ", bedrooms=" + bedrooms +
+                ", bathrooms=" + bathrooms +
+                ", squareFootage=" + squareFootage +
+                ", lotSize=" + lotSize +
+                ", yearBuilt=" + yearBuilt +
+                ", status='" + status + '\'' +
+                ", price=" + price +
+                ", listingType='" + listingType + '\'' +
+                ", listedDate=" + listedDate +
+                ", removedDate=" + removedDate +
+                ", daysOnMarket=" + daysOnMarket +
+                ", mlsName='" + mlsName + '\'' +
+                ", mlsNumber='" + mlsNumber + '\'' +
+                ", agent=" + agent +
+                ", office=" + office +
+                ", priceHistory=" + priceHistory +
+                ", source='" + source + '\'' +
+                ", fetchedAt=" + fetchedAt +
+                '}';
+    }
 }

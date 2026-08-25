@@ -1,6 +1,8 @@
 package com.oncoord.propertyscout.valuegap;
 
 import com.oncoord.propertyscout.model.Listing;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -31,6 +33,8 @@ public class GapRecomputeService {
     private final ValueGapPipelineService pipelineService;
     private final GapRankingService gapRankingService;
     private final JdbcTemplate jdbcTemplate;
+    private static final Logger log = LoggerFactory.getLogger(GapRecomputeService.class);
+
 
     private static final String UPSERT_SQL = """
             INSERT INTO gap_results
@@ -76,9 +80,23 @@ public class GapRecomputeService {
      */
     public RecomputeSummary recomputeAndStore(List<Listing> listings) {
         List<GapResult> results = new ArrayList<>();
+        int total = listings.size();
+        int processed = 0;
+        int failed = 0;
         for (Listing listing : listings) {
-            pipelineService.computeForListing(listing).ifPresent(results::add);
+            try {
+                pipelineService.computeForListing(listing).ifPresent(results::add);
+            } catch (Exception e) {
+                log.warn("computeForListing failed for listing {}: {}", listing.getListingId(), e.getMessage());
+                failed++;
+            }
+            processed++;
+            if (processed % 1000 == 0 || processed == total) {
+                log.info("Processed {} of {} records ({} failed)", processed, total, failed);
+            }
         }
+        log.info("Processed {} of {} records ({} failed)", processed, total, failed);
+
 
         // rank() sets relativeGapPct on each result as a side effect
         // (group-relative to gapPct within its property type) -- the

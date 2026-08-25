@@ -36,22 +36,29 @@ Usage:
     python run_ingest.py --state ct nh --towns Bristol Lincoln --out data/
     python run_ingest.py --state ma --all-towns --out ma_data
     python run_ingest.py --state nh --towns Lincoln --out nh_data_v2/
+    python run_ingest.py --state nj --towns Newark "Jersey City" --out data/
+    python run_ingest.py --state md --towns 03 --out data/   # 03 is a JURSCODE, not a county name -- see SPIDER_KWARGS comment below
 
 
 """
 
 import argparse
 import sys
+from pathlib import Path
 
 from spiders.ct.ct_spider import CTSpider
 from spiders.nh.nh_spider import NHSpider
 from spiders.ma.ma_spider import MASpider
+from spiders.md.md_spider import MDSpider
+from spiders.nj.nj_spider import NJSpider
 from spiders.axisgis.axisgis_spider import AxisGISSpider
 
 REGISTRY = {
     "ct": CTSpider,
     "nh": NHSpider,
     "ma": MASpider,
+    "md": MDSpider,
+    "nj": NJSpider,
 }
 
 # Maps each state key to which of this file's CLI arg names (dest, with
@@ -64,10 +71,19 @@ SPIDER_KWARGS = {
         "pid_end": "pid_end",
         "out_dir": "out",
     },
-    # ma intentionally absent -- MASpider takes no constructor args since
-    # its rewrite as a live query (was file-based, needed geojson_path;
-    # removed when that changed, see ma_spider.py's module docstring).
+    # ma, md, nj intentionally absent -- none of their spiders take
+    # constructor args (MASpider since its live-query rewrite, see
+    # ma_spider.py's docstring; MDSpider/NJSpider from the start, same
+    # shape as CTSpider).
 }
+
+# MD ONLY, CALLER BEWARE: MDSpider.fetch_town() takes a JURSCODE (e.g.
+# "03"), not a county name -- md_spider.py's list_towns() returns real
+# JURSCODE values but no live-confirmed code->name table exists yet
+# (see md_spider.py's module docstring). So `--towns` for md means
+# "pass JURSCODE values", not friendly county names, unlike every other
+# state here. Run `python -m spiders.md.md_spider --list-jurisdictions`
+# first if you don't already know the code you want.
 
 # Same pattern as AuctionScout's KNOWN_UNAVAILABLE dict: imported and
 # visible in the codebase, but deliberately NOT in REGISTRY, so nothing
@@ -101,9 +117,14 @@ def main():
     parser.add_argument("--pid-end", type=int, default=20000, help="NH only")
     parser.add_argument("--town-slug", help="NH only, single-town VGSI slug override")
     parser.add_argument("--granit-geojson", help="NH only, single-town pre-downloaded geojson")
+    parser.add_argument("-e", "--stop-on-error", action="store_true",
+                         help="stop immediately if any town fails, instead of the default "
+                              "behavior of logging the failure to <out>/<state>_failed.txt "
+                              "and continuing with the remaining towns")
     args = parser.parse_args()
 
     overall_summary = {}
+    overall_failures = {}
     for state_key in args.state:
         if state_key in KNOWN_UNAVAILABLE:
             print(f"ERROR: '{state_key}' is a known stub, not yet permitted to run live. "
@@ -126,15 +147,57 @@ def main():
         else:
             towns = args.towns
 
-        summary = spider.run(towns, args.out)
+        # Run one town at a time, rather than handing the whole list to
+        # spider.run() in a single call, specifically so one town's
+        # failure can't take down every town after it -- each call is
+        # isolated, matching the pattern AuctionScout's per-spider
+        # try/except in run-scout.py already uses for the same reason.
+        # Writes to <out>/<state>_failed.txt so a long unattended run
+        # (e.g. 39 NH towns) leaves a record of exactly what needs a
+        # re-run, instead of scrolling terminal output being the only
+        # trace of what failed.
+        summary = []
+        failures = []
+        for town in towns:
+            try:
+                town_summary = spider.run([town], args.out)
+                summary.extend(town_summary)
+            except Exception as e:
+                print(f"  [{state_key}] {town}: FAILED -- {e}")
+                failures.append((town, str(e)))
+                if args.stop_on_error:
+                    raise
+
         overall_summary[state_key] = summary
+        overall_failures[state_key] = failures
+
+        if failures:
+            failed_path = Path(args.out) / f"{state_key}_failed.txt"
+            failed_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(failed_path, "w") as f:
+                for town, err in failures:
+                    f.write(f"{town}\t{err}\n")
+            print(f"[{state_key}] {len(failures)} town(s) failed -- see {failed_path}")
 
     print("\n" + "=" * 60)
     print("INGESTION SUMMARY")
     for state_key, summary in overall_summary.items():
         for town, count in summary:
             print(f"  {state_key.upper()} {town}: {count} records")
+    if any(overall_failures.values()):
+        print("-" * 60)
+        print("FAILURES")
+        for state_key, failures in overall_failures.items():
+            for town, err in failures:
+                print(f"  {state_key.upper()} {town}: {err}")
     print("=" * 60)
+
+    # Nonzero exit on any failure -- previously always exited 0 even when
+    # towns failed internally, which meant a caller checking $? (e.g. a
+    # shell loop invoking this once per town) could never tell a failed
+    # run apart from a clean one without parsing stdout.
+    if any(overall_failures.values()):
+        sys.exit(1)
 
 
 if __name__ == "__main__":
