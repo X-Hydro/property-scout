@@ -35,6 +35,7 @@ public class GapRecomputeService {
     private final JdbcTemplate jdbcTemplate;
     private static final Logger log = LoggerFactory.getLogger(GapRecomputeService.class);
 
+    private static final List<String> DEFAULT_STATUSES = List.of("Active");
 
     private static final String UPSERT_SQL = """
             INSERT INTO gap_results
@@ -152,17 +153,18 @@ public class GapRecomputeService {
         return con.createArrayOf("text", ids.toArray());
     }
 
-    /**
-     * Fast read path for GET /rank -- pure SQL against precomputed
-     * gap_results, no live computation. Groups by property_type (already
-     * sorted gap DESC by the query) and truncates each group to `limit` if
-     * given.
-     */
     public Map<String, Object> findRanked(String state, String city, String zipCode,
-                                          String propertyType, Integer limit) {
-        String sql = """
+                                          String propertyType, Integer limit, List<String> statuses) {
+        List<String> effectiveStatuses = (statuses == null || statuses.isEmpty())
+                ? DEFAULT_STATUSES
+                : statuses;
+        String statusPlaceholders = effectiveStatuses.stream()
+                .map(s -> "?")
+                .collect(Collectors.joining(", "));
+
+        String sql = ("""
                 SELECT l.listing_id, l.formatted_address AS address, l.property_type,
-                       l.year_built, l.price, g.target_assessed_value, g.comp_median,
+                       l.year_built, l.price, l.status, g.target_assessed_value, g.comp_median,
                        g.comp_min, g.comp_max, g.comp_count, g.gap, g.gap_pct, g.relative_gap_pct
                 FROM gap_results g
                 JOIN listings l ON l.listing_id = g.listing_id
@@ -170,11 +172,22 @@ public class GapRecomputeService {
                   AND (?::text IS NULL OR l.city = ?)
                   AND (?::text IS NULL OR l.zip_code = ?)
                   AND (?::text IS NULL OR l.property_type = ?)
+                  AND l.status IN (%s)
                   AND g.has_comps = true
                 ORDER BY l.property_type, g.gap DESC
-                """;
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql,
-                state, city, city, zipCode, zipCode, propertyType, propertyType);
+                """).formatted(statusPlaceholders);
+
+        List<Object> args = new ArrayList<>();
+        args.add(state);
+        args.add(city);
+        args.add(city);
+        args.add(zipCode);
+        args.add(zipCode);
+        args.add(propertyType);
+        args.add(propertyType);
+        args.addAll(effectiveStatuses);
+
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, args.toArray());
 
         Map<String, List<Map<String, Object>>> byType = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {

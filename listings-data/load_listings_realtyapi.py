@@ -91,6 +91,49 @@ STATUS_MAP = {
     "off_market": "Inactive",
 }
 
+# CONFIRMED real-data bug fix (2026-08-25): RealtyAPI's top-level `status`
+# field can be STALE/WRONG relative to `flags` -- a real record was seen
+# with status="for_sale" AND flags.is_pending=true simultaneously; the
+# listing genuinely was pending on realtor.com. `flags` carries more
+# precise state than `status` for at least this case, so it takes
+# priority when present. Same pattern already existed for
+# flags.is_new_construction (see listing_type below) -- this extends the
+# same idea to status itself.
+#
+# ONLY confirmed flag so far is is_pending. No real sample has shown an
+# is_contingent (or similarly-named) flag yet -- do NOT guess a key name
+# here; _listing_dict_from_raw below surfaces any unrecognized true flag
+# so a future one gets caught rather than silently ignored the way
+# is_pending was until this fix.
+# CONFIRMED 2026-08-25 from the real 12-file MD/MA/NJ corpus: is_pending
+# and is_contingent are real transaction-stage flags -- a listing marked
+# either one is genuinely not available the way an Active listing is.
+STATUS_FLAG_OVERRIDES = {
+    "is_pending": "Pending",
+    "is_contingent": "Contingent",
+}
+# is_coming_soon (CONFIRMED real, ~30+ hits in the same run) is
+# DELIBERATELY treated as Active, not its own status -- explicit decision
+# to upload Coming Soon listings as Active rather than a distinct bucket.
+# is_foreclosure (CONFIRMED real, 3 hits) is handled separately below via
+# listing_type, NOT here -- it's a different KIND of signal than
+# Pending/Contingent: those describe the CURRENT TRANSACTION STAGE
+# (mutually exclusive with Active); foreclosure describes WHY the
+# property is for sale, and isn't mutually exclusive with any status -- a
+# foreclosure listing can itself be Active, Pending, etc. Forcing it into
+# `status` here would incorrectly treat "this is a foreclosure" as if it
+# meant "this isn't really for sale," the same mistake this whole fix
+# started out correcting.
+LISTING_TYPE_FLAGS = {
+    "is_foreclosure": "Foreclosure",
+}
+# Flags known to be unrelated to status (either irrelevant, deliberately
+# treated as Active, or handled via listing_type instead -- see
+# LISTING_TYPE_FLAGS), so they don't trigger the "unrecognized flag"
+# warning below.
+NON_STATUS_FLAGS = {"is_new_construction", "is_new_listing", "is_price_reduced",
+                     "is_foreclosure", "is_coming_soon"}
+
 
 def _get(d, path, default=None):
     """Dotted-path getter that fails soft instead of raising."""
@@ -102,6 +145,17 @@ def _get(d, path, default=None):
         if cur is None:
             return default
     return cur
+
+
+def _listing_type_from_flags(flags: dict) -> str | None:
+    """New construction takes priority if a record somehow had both flags
+    true (not seen in practice, but this keeps behavior deterministic
+    rather than depending on dict key order)."""
+    if flags.get("is_new_construction"):
+        return "New Construction"
+    if flags.get("is_foreclosure"):
+        return "Foreclosure"
+    return None
 
 
 def _to_float(val):
@@ -135,9 +189,30 @@ def _listing_dict_from_raw(raw: dict) -> dict:
     Stoneham, MA sample response -- see module docstring."""
     address = raw.get("address") or {}
     advertisers = raw.get("advertisers")
+    flags = raw.get("flags") or {}
 
     property_type_raw = raw.get("property_type")
     status_raw = raw.get("status")
+
+    # flags takes priority over the raw status string -- see
+    # STATUS_FLAG_OVERRIDES' comment above for the confirmed real case
+    # this fixes (status="for_sale" + flags.is_pending=true on the same
+    # record).
+    status_from_flags = None
+    for flag_key, mapped_status in STATUS_FLAG_OVERRIDES.items():
+        if flags.get(flag_key):
+            status_from_flags = mapped_status
+            break
+    final_status = status_from_flags or STATUS_MAP.get(status_raw, status_raw)
+
+    unhandled_true_flags = [
+        k for k, v in flags.items()
+        if v is True and k not in STATUS_FLAG_OVERRIDES and k not in NON_STATUS_FLAGS
+    ]
+    if unhandled_true_flags:
+        listing_ref = raw.get("listing_id") or raw.get("property_id") or "<unknown>"
+        print(f"  NOTE: listing {listing_ref}: unrecognized true flag(s) {unhandled_true_flags} "
+              f"-- check if this should affect status (see STATUS_FLAG_OVERRIDES)")
 
     line = address.get("line")
     city = address.get("city")
@@ -164,9 +239,9 @@ def _listing_dict_from_raw(raw: dict) -> dict:
         "square_footage": raw.get("sqft"),
         "lot_size": raw.get("lot_sqft"),  # NOTE: confirm units (sqft) match property_values.acreage before comparing -- see listings_schema.sql
         "year_built": None,  # NOT returned by /search/byzip -- only available via /details/byid (1 credit/call extra)
-        "status": STATUS_MAP.get(status_raw, status_raw),
+        "status": final_status,
         "price": raw.get("list_price"),
-        "listing_type": "New Construction" if _get(raw, "flags.is_new_construction") else None,
+        "listing_type": _listing_type_from_flags(flags),
         "listed_date": _iso_date_only(raw.get("list_date")),
         "removed_date": None,  # Search results are active listings; removed_date isn't populated here
         "days_on_market": None,  # NOT returned by /search/byzip

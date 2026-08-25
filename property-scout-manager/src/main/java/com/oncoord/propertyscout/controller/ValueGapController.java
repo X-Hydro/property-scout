@@ -49,6 +49,12 @@ public class ValueGapController {
      * query (no city) with limit=25 returns the top 25 by gap for each
      * property type across the whole state, for a "biggest gaps, don't care
      * what town" view, rather than every matching listing statewide.
+     *
+     * statuses is optional, comma-separated (e.g. statuses=Active,Pending)
+     * -- Spring binds a repeated/comma-separated query param straight to
+     * List<String>. Defaults to Active-only when omitted (see
+     * GapRecomputeService.DEFAULT_STATUSES) -- the frontend's "include
+     * pending/contingent" toggle sets this explicitly to widen the result.
      */
     @GetMapping("/rank")
     public ResponseEntity<?> rankGaps(
@@ -56,10 +62,11 @@ public class ValueGapController {
             @RequestParam(required = false) String city,
             @RequestParam(required = false) String zipCode,
             @RequestParam(required = false) String propertyType,
-            @RequestParam(required = false) Integer limit) {
+            @RequestParam(required = false) Integer limit,
+            @RequestParam(required = false) List<String> statuses) {
 
         try {
-            return ResponseEntity.ok(recomputeService.findRanked(state, city, zipCode, propertyType, limit));
+            return ResponseEntity.ok(recomputeService.findRanked(state, city, zipCode, propertyType, limit, statuses));
         } catch (Exception e) {
             log.error("Rank query failed: state={} city={}", state, city, e);
             return ResponseEntity.internalServerError()
