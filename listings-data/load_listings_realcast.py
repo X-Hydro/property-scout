@@ -27,8 +27,8 @@ Requires: psycopg2 (pip install psycopg2-binary), and schema.sql (with
 the listings table, see listings_schema.sql) already applied.
 
 Usage:
-python load_listings.py nh_data/nh_lincoln_sfh_land.json --dsn "postgresql://oncoord:<pw>@localhost:5432/property-scout"
-python load_listings.py rentcast_data/ --dsn "postgresql://..."  # directory of files,
+python load_listings_realcast.py nh_data/nh_lincoln_sfh_land.json --dsn "postgresql://oncoord:<pw>@localhost:5432/property-scout"
+python load_listings_realcast.py rentcast_data/ --dsn "postgresql://..."  # directory of files,
                                                                  # non-recursive, same
                                                                  # convention as
                                                                  # load_property_values.py
@@ -214,10 +214,10 @@ def _check_schema_exists(conn):
 def main():
     if len(sys.argv) == 1:
         print("Usage:")
-        print("  python load_listings.py <file-or-directory> --dsn \"<postgresql-dsn>\"")
+        print("  python load_listings_realcast.py <file-or-directory> --dsn \"<postgresql-dsn>\"")
         print()
         print("Example:")
-        print('  python load_listings.py nh_data/nh_lincoln_sfh_land.json --dsn "postgresql://oncoord:<pw>@localhost:5432/property-scout"')
+        print('  python load_listings_realcast.py nh_data/nh_lincoln_sfh_land.json --dsn "postgresql://oncoord:<pw>@localhost:5432/property-scout"')
         sys.exit(1)
 
     parser = argparse.ArgumentParser()
