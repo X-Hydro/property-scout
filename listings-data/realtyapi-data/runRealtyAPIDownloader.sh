@@ -11,24 +11,31 @@ if [ -z "$REALTYAPI_KEY" ]; then
 fi
 
 if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-    echo "Usage: $0 <state_abbr> [city]"
+    echo "Usage: $0 <state_abbr> <city>"
     echo "       $0 --zip <zipcode>"
     echo
     echo "Examples:"
-    echo "  $0 MA                 # statewide -- UNVERIFIED, see warning below"
-    echo "  $0 MA Stoneham         # single city -- UNVERIFIED, see warning below"
-    echo "  $0 --zip 02180         # single zip -- CONFIRMED working, use this if unsure"
+    echo "  $0 MA Stoneham         # single city -- CONFIRMED working"
+    echo "  $0 --zip 02180         # single zip -- CONFIRMED working"
     echo
     echo "Downloads active Single Family + Land listings from RealtyAPI's"
     echo "Realtor.com endpoint."
     echo
-    echo "*** IMPORTANT ***"
-    echo "Only /search/byzip (the --zip mode) has been confirmed against a real"
-    echo "response. The <state> [city] mode uses /search/bylocation with a guessed"
-    echo "'location' param -- untested against Realtor's endpoint (we only ever"
-    echo "confirmed Redfin's very different bylocation shape). This script forces"
-    echo "a single-page test run first specifically because of that -- read its"
-    echo "output before letting it proceed to a full paginated download."
+    echo "*** STATEWIDE (state only, no city) IS NOT SUPPORTED -- CONFIRMED BROKEN ***"
+    echo "Tested 2026-08-25: '\$0 NJ' returned message=Success, total=168, with zero"
+    echo "error -- but every result clustered in 8 neighboring Bergen/Passaic County"
+    echo "towns, nothing from the rest of the state. /search/bylocation appears to"
+    echo "geocode 'location' to a single POINT and search a radius around it, not"
+    echo "match a state boundary -- a bare state abbreviation is a bad geocoding"
+    echo "input and silently returns a small, misleadingly plausible-looking subset"
+    echo "instead of an error. This script now REQUIRES a city so that mistake can't"
+    echo "happen by accident -- always pass one, or use --zip."
+    echo
+    echo "Realistic statewide coverage likely isn't achievable through this endpoint"
+    echo "at all (nothing found resolves a state boundary) -- and even if it were,"
+    echo "a real state's worth of listings would need far more than your 250/month"
+    echo "shared quota at resultCount=200 per request. City-by-city (or zip-by-zip)"
+    echo "is both the only proven-accurate scope and the only realistic one."
     echo
     echo "Uses resultCount=200 (the confirmed max) on every request -- billing is"
     echo "per REQUEST, not per record, so there's no cost to always asking for the"
@@ -89,13 +96,21 @@ if [ "$1" == "--zip" ]; then
         echo "$out_file"
     }
 else
-    # UNVERIFIED path -- see the warning printed in usage above.
+    # bylocation path -- REQUIRES a city (see usage text above for why:
+    # state-only was confirmed to silently return a small radius-search
+    # subset, not real statewide coverage).
     STATE=$(echo "$1" | tr '[:lower:]' '[:upper:]')
     CITY="$2"
-    LOCATION="$STATE"
-    if [ -n "$CITY" ]; then
-        LOCATION="${CITY}, ${STATE}"
+    if [ -z "$CITY" ]; then
+        echo "ERROR: a city is required -- '\$0 ${STATE}' alone is not supported." >&2
+        echo "CONFIRMED 2026-08-25: state-only /search/bylocation silently returns a" >&2
+        echo "small radius-search subset around one geocoded point, not the whole" >&2
+        echo "state, with no error to indicate anything's wrong. Pass a city, e.g." >&2
+        echo "  $0 ${STATE} <city>" >&2
+        echo "or use --zip for a specific zip code instead." >&2
+        exit 1
     fi
+    LOCATION="${CITY}, ${STATE}"
     DATA_DIR="realtyapi_data"
     mkdir -p "$DATA_DIR"
     FILE_PREFIX=$(echo "${STATE}_${CITY}" | tr '[:upper:] ' '[:lower:]_' | sed 's/_$//')
@@ -114,10 +129,6 @@ else
             -o "$out_file"
         echo "$out_file"
     }
-
-    echo "*** ${LOCATION}: using UNVERIFIED /search/bylocation -- fetching a single"
-    echo "test page first. Check its shape before this proceeds to full download. ***"
-    echo
 fi
 
 echo "Fetching page 1 for ${SCOPE_LABEL}..."

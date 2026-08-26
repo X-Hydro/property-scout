@@ -51,6 +51,7 @@ from spiders.nh.nh_spider import NHSpider
 from spiders.ma.ma_spider import MASpider
 from spiders.md.md_spider import MDSpider
 from spiders.nj.nj_spider import NJSpider
+from spiders.vt.vt_spider import VTSpider
 from spiders.axisgis.axisgis_spider import AxisGISSpider
 
 REGISTRY = {
@@ -59,6 +60,7 @@ REGISTRY = {
     "ma": MASpider,
     "md": MDSpider,
     "nj": NJSpider,
+    "vt": VTSpider,
 }
 
 # Maps each state key to which of this file's CLI arg names (dest, with
