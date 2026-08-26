@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS property_values (
 );
 
 CREATE INDEX IF NOT EXISTS property_values_state_muni_idx ON property_values (state, municipality);
+CREATE INDEX IF NOT EXISTS property_values_state_city_idx ON property_values (state, city);
 CREATE INDEX IF NOT EXISTS property_values_geometry_gix ON property_values USING GIST (geometry);
 CREATE INDEX IF NOT EXISTS property_values_geography_gix ON property_values USING GIST ((geometry::geography));
 CREATE INDEX IF NOT EXISTS property_values_property_type_idx ON property_values (property_type);
@@ -132,3 +133,4 @@ CREATE TABLE IF NOT EXISTS gap_results (
 CREATE INDEX IF NOT EXISTS idx_gap_results_gap
     ON gap_results (gap DESC)
     WHERE has_comps = true;
+CREATE INDEX ON gap_results(listing_id);

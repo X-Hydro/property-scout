@@ -249,6 +249,27 @@ def _dedupe_key(result: dict, id_field: str | None) -> str:
     return "hash:" + hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
 
 
+def dry_run_polygon(ring: list[list[float]], api_key: str, property_type: str) -> tuple[int, int]:
+    """Fetches ONLY page 1 (one request, not the full pagination) and
+    reads the API's own "total" field to compute (total_listings,
+    pages_needed) for this part. This is the entire cost model a dry
+    run needs -- RealtyAPI reports the true total up front, so there's
+    no need to actually walk every page just to count them."""
+    headers = {"x-realtyapi-key": api_key}
+    params = {
+        "polygon": ring_to_polygon_param(ring),
+        "page": 1,
+        "resultCount": RESULT_COUNT,
+        "sortOrder": SORT_ORDER,
+        "searchType": SEARCH_TYPE,
+        "propertyType": property_type,
+    }
+    data = _request_with_retries(headers, params)
+    total = data.get("total", 0)
+    pages = -(-total // RESULT_COUNT) if total else 0  # ceil division
+    return total, pages
+
+
 def search_polygon(ring: list[list[float]], api_key: str, property_type: str,
                     part_label: str) -> list[dict]:
     headers = {"x-realtyapi-key": api_key}
@@ -260,18 +281,43 @@ def search_polygon(ring: list[list[float]], api_key: str, property_type: str,
         "searchType": SEARCH_TYPE,
         "propertyType": property_type,
     }
-
     part_results = []
+    last_known_total = None
     while True:
         data = _request_with_retries(headers, params)
         results = data.get("searchResults", [])
         part_results.extend(results)
+        reported_total = data.get("total")
         print(f"  [{part_label}] page {params['page']}: {len(results)} listings, "
-              f"{len(part_results)}/{data.get('total')}")
+              f"{len(part_results)}/{reported_total}")
+        if reported_total:
+            last_known_total = reported_total
         if not data.get("nextPage"):
             break
         params["page"] += 1
         time.sleep(PAGE_SLEEP_SECONDS)
+
+    # CONFIRMED real failure mode (MD, 2026-08-26): the API silently caps
+    # pagination at 10,000 results (50 pages x 200/page -- almost
+    # certainly an Elasticsearch-style max_result_window default on
+    # RealtyAPI's backend, not something documented up front). Page 50
+    # reported total=16210 with more data clearly available; page 51
+    # returned 0 results AND total=0, which makes nextPage falsy and
+    # ends the loop as if the search were genuinely exhausted. Without
+    # this check, that looks identical to a normal, complete run --
+    # ~38% of MD's real listings were silently dropped with no error and
+    # no warning in the original version of this function. Comparing
+    # what we actually fetched against the LAST total the API reported
+    # before it (suspiciously) dropped to 0 catches this instead of
+    # reporting a false "Done".
+    if last_known_total is not None and len(part_results) < last_known_total:
+        print(f"  WARNING [{part_label}]: fetched {len(part_results)} but the API last "
+              f"reported total={last_known_total} before returning an empty/zero-total page "
+              f"-- this looks like a pagination cap (commonly 10,000 results), NOT a genuine "
+              f"end of results. This part's data is INCOMPLETE. See module docstring's "
+              f"CONFIRMED failure mode notes for how to work around this (splitting the query "
+              f"into smaller sub-searches) before trusting this part's output.")
+
     return part_results
 
 
@@ -296,6 +342,10 @@ def main():
                          help=f"drop any kept part smaller than this (default "
                               f"{MIN_PART_AREA_KM2_DEFAULT} km2) -- currently a no-op on the "
                               f"cb_2025_us_state_20m.geojsonl file, see module docstring")
+    parser.add_argument("--dry-run", action="store_true",
+                         help="fetch only page 1 of each selected part (up to --max-parts "
+                              "requests total) to report total listings and total pages "
+                              "needed, then exit -- does not write an output file")
     args = parser.parse_args()
 
     api_key = os.environ.get("REALTYAPI_KEY")
@@ -319,6 +369,24 @@ def main():
               f"see module docstring's CONFIRMED IMPACT notes before assuming this is harmless")
     if dropped_by_size:
         print(f"  DROPPED (< {args.min_part_area_km2} km2): {[round(a, 1) for a in dropped_by_size]} km2")
+
+    if args.dry_run:
+        grand_total = 0
+        grand_pages = 0
+        for part_idx, ring in enumerate(rings):
+            part_label = f"part {part_idx + 1}/{len(rings)}"
+            try:
+                total, pages = dry_run_polygon(ring, api_key, args.property_type)
+            except ScriptError as e:
+                print(f"FAILED on {part_label}: {e}", file=sys.stderr)
+                sys.exit(1)
+            print(f"  [{part_label}] total listings: {total}  ->  pages needed: {pages}")
+            grand_total += total
+            grand_pages += pages
+        print(f"\nDRY RUN: {grand_total} total listing(s) across {len(rings)} part(s), "
+              f"{grand_pages} page(s)/request(s) for the full fetch "
+              f"(plus {len(rings)} already spent on this dry run). No output file written.")
+        return
 
     all_results: list[dict] = []
     id_field: str | None = None

@@ -213,8 +213,16 @@ public class ListingsService {
     }
 
     public List<StateCityRec> getStateCity() {
+        //Note:  This is joinedto the gap_results table as we don't want
+        //a user to be able to select a state or state/city that has not been
+        //analyzed yet.
         return jdbcTemplate.query(
-                "SELECT DISTINCT state, city FROM listings ORDER BY state, city",
+                "SELECT DISTINCT l.state, l.city " +
+                        "FROM listings l " +
+                        "WHERE EXISTS (" +
+                        "    SELECT 1 FROM gap_results g WHERE g.listing_id = l.listing_id" +
+                        ") " +
+                        "ORDER BY l.state, l.city",
                 (rs, rowNum) -> new StateCityRec(rs.getString("state"), rs.getString("city"))
         );
     }
