@@ -70,10 +70,10 @@ Usage:
 
 import sys
 import csv
-import time
 import re
 import requests
 import json
+import concurrent.futures
 from pathlib import Path
 from bs4 import BeautifulSoup
 
@@ -92,6 +92,34 @@ from property_types import standardize_property_type
 
 BASE = "https://gis.vgsi.com/{town}/Parcel.aspx?Pid={pid}"
 HEADERS = {"User-Agent": "ValueGap research tool (personal project, low volume)"}
+
+# SPEEDUP (2026-08-26): the original design was fully serial -- one request,
+# wait, time.sleep(0.5), repeat -- which meant a town with pid_end=8000 spent
+# 66+ minutes in sleep() alone, on top of per-request latency inflated by
+# requests.get() opening a brand-new TCP+TLS connection every single time
+# instead of reusing one. A real 40-town run of this pipeline took over 48
+# hours and didn't finish.
+#
+# Fix has two parts, both applied to Pass 1 (scrape_town) and Pass 2
+# (vgsi_targeted_lookup.lookup_and_fetch, via a shared session passed in):
+#   1. One requests.Session() reused for every request in a town's run,
+#      instead of a fresh connection per PID.
+#   2. A small bounded thread pool (MAX_WORKERS) instead of one request at
+#      a time -- these are I/O-bound waits, exactly where concurrency helps.
+#
+# MAX_WORKERS deliberately conservative (5) -- VGSI is a small public-sector
+# vendor site with no documented rate limit, and this project has already
+# been asked to be a "low volume" polite citizen (see HEADERS above). Raise
+# this only after watching a real run for 429s/errors at this level first.
+MAX_WORKERS = 5
+
+# PIDs are submitted and awaited in chunks of this size (bounded to
+# MAX_WORKERS concurrent in flight at once by the executor) so the
+# consecutive-miss early-stop logic and the "pid % 100" progress print can
+# still be evaluated in strict PID order afterward, same as the old serial
+# loop -- concurrency changes WHEN results arrive, not the order they're
+# processed in once they're all back.
+BATCH_SIZE = 50
 
 FIELDNAMES = ["pid", "location", "total_market_value", "mblu", "acres", "land_use_desc", "match_source"]
 
@@ -130,13 +158,21 @@ def parse_parcel(html: str) -> dict | None:
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text(separator="\n")
 
-    # FIXED 2026-08-25: was gated on "Total Market Value", which no
-    # longer appears anywhere under VGSI's redesigned layout (confirmed
-    # via a real pasted page -- see module docstring). "PID" is a label
-    # still confirmed present on a real parcel page and was already
-    # being grabbed separately below -- a blank/error page (invalid PID)
-    # still won't have it.
-    if "PID" not in text:
+    # FIXED (this pass): the previous gate checked only for "PID" as
+    # visible text, which was correct for the redesigned layout (confirmed
+    # via Amherst) but wrong for towns still on VGSI's OLD layout --
+    # CONFIRMED via Manchester, PID 29475 ("352 W Haven Rd"): "PID" never
+    # appears as visible text on the old layout at all, even though the
+    # page is a completely valid, fully populated parcel record (contains
+    # "Location", "Total Market Value", and "Assessment"). The old gate
+    # was silently discarding every good record from towns like this,
+    # which is what inflated Manchester's Pass 2b fallback to 28,132
+    # addresses -- most of those were never actually missing from VGSI.
+    #
+    # New gate accepts either layout: "Location" is present on both, and
+    # "Total Market Value" (old) / "Assessment" (new) confirm it's a real
+    # populated record and not a blank/error page.
+    if "Location" not in text and "Total Market Value" not in text and "Assessment" not in text:
         return None
 
     def grab(label: str, pattern: str = r"\$?([\d,]+)"):
@@ -149,6 +185,16 @@ def parse_parcel(html: str) -> dict | None:
     # "#LOT" unit suffixes on undeveloped land, etc.) so matching the label
     # is far more reliable than matching the shape of an address.
     location_m = re.search(r"Location\s*\n+\s*(.+?)\s*\n", text)
+
+    # FIXED (this pass): try the OLD layout's label first ("Total Market
+    # Value" -- CONFIRMED present and followed by a dollar figure on
+    # Manchester PID 29475), falling back to the NEW layout's first
+    # "Assessment" occurrence (CONFIRMED via Amherst) if the old label
+    # isn't there. Checking the more specific "Total Market Value" string
+    # first avoids any risk of it matching something unintended on a new-
+    # layout page that happens to also contain the word "Assessment"
+    # elsewhere before the real value.
+    total_market_value = grab("Total Market Value") or grab("Assessment")
 
     # The Land Use section has a "Description" field (e.g. "Single Family",
     # "Residential Land") -- this is the assessor's own plain-English
@@ -163,17 +209,17 @@ def parse_parcel(html: str) -> dict | None:
         desc_m = re.search(r"Description\s*\n+\s*(.+?)\s*\n", land_use_section[1])
         if desc_m:
             land_use_desc = standardize_land_use(desc_m.group(1).strip())
+
     return {
         "location": location_m.group(1).strip() if location_m else None,
-        # FIXED 2026-08-25: was grab("Total Market Value") -- CONFIRMED
-        # via the real Amherst sample that the total assessed value is
-        # now labeled just "Assessment", and the FIRST occurrence in the
-        # page text (right after Owner, before PID) is immediately
-        # followed by the dollar figure in the same shape grab() already
-        # expects. The second "Assessment" occurrence (the "Current
-        # Value" section header) is followed by table headers, not a
-        # dollar figure, so it won't false-match here.
-        "total_market_value": grab("Assessment"),
+        "total_market_value": total_market_value,
+        # NOTE: "pid" will legitimately come back None on old-layout pages,
+        # since that label simply isn't rendered as visible text there --
+        # this is expected, not a bug. Every caller already has a fallback:
+        # _scan_pid_range uses `parsed["pid"] or pid` (the PID it already
+        # knows from the loop), and vgsi_targeted_lookup._fetch_and_parse
+        # overwrites parsed["pid"] = pid from the search result. Nothing
+        # downstream depends on this regex succeeding.
         "pid": grab("PID", r"(\d+)"),
         "mblu": grab("Mblu", r"([\d/ ]+)"),
         "land_use_desc": land_use_desc,
@@ -207,131 +253,308 @@ def find_missing_addresses(found_locations: list[str], granit_geojson_path: str)
     return [expected_by_key[k] for k in missing_keys]
 
 
-def scrape_town(town_slug: str, pid_start: int, pid_end: int, granit_geojson_path: str,
-                 out_path: str, max_consecutive_misses: int = 300):
+def _fetch_pid(session: requests.Session, town_slug: str, pid: int):
     """
-    Pass 1: walk PIDs sequentially. VGSI PIDs are dense but not perfectly
-    contiguous (demolished/merged parcels leave gaps), so we tolerate gaps
-    but bail out after a long consecutive run of misses -- that's a strong
-    signal we've run past the top of the town's main PID range (NOT
-    necessarily the top of the town's real PID range -- see Pass 2).
+    Fetch + parse one PID. Returns (pid, parsed_or_None, error_or_None) --
+    always returns the pid so results can be re-sorted back into order
+    after concurrent.futures.as_completed() returns them out of order.
+    """
+    url = BASE.format(town=town_slug, pid=pid)
+    try:
+        resp = session.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        parsed = parse_parcel(resp.text)
+    except requests.RequestException as e:
+        return pid, None, str(e)
+    return pid, parsed, None
 
-    max_consecutive_misses defaults to 300 (raised from an earlier 50) --
-    a run of Lincoln, NH showed a legitimate mid-range gap (block 132) that
-    a threshold of 50 may have been enough to misinterpret as "end of town",
-    stopping the crawl early and silently leaving real parcels unscraped.
 
-    Pass 2: automatically runs after Pass 1 -- see module docstring.
+def _scan_pid_range(session: requests.Session, town_slug: str, writer: csv.DictWriter,
+                     pid_start: int, pid_end: int, match_source: str,
+                     max_consecutive_misses: int | None, progress_label: str) -> list[dict]:
+    """
+    Concurrently fetch every PID in [pid_start, pid_end] (MAX_WORKERS at a
+    time, batched, over the shared session), writing each real hit to
+    `writer` tagged with match_source, and returning the rows written.
+
+    max_consecutive_misses=None scans the FULL range regardless of misses
+    -- appropriate for a short, already-located cluster window, where the
+    goal is "check every PID in this window" rather than "find where a
+    long empty stretch begins." Pass 1 (the wide primary range) still
+    wants the early-stop behavior; a cluster sweep (a window this
+    function itself sized around a real discovered PID) does not -- it's
+    already narrow and already known to contain real parcels.
+
+    This is the same batch/thread-pool logic Pass 1 used before it was
+    split out here -- pulled into its own function so the cluster sweep
+    (see scrape_town()) can reuse it on arbitrary PID windows instead of
+    only the one primary range.
     """
     rows = []
     consecutive_misses = 0
-    last_pid_seen = pid_start
-    stopped_early = False
+    pid_range = list(range(pid_start, pid_end + 1))
 
-    with open(out_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        writer.writeheader()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        for batch_start in range(0, len(pid_range), BATCH_SIZE):
+            batch = pid_range[batch_start: batch_start + BATCH_SIZE]
 
-        for pid in range(pid_start, pid_end + 1):
-            last_pid_seen = pid
-            url = BASE.format(town=town_slug, pid=pid)
-            try:
-                resp = requests.get(url, headers=HEADERS, timeout=15)
-                resp.raise_for_status()
-                parsed = parse_parcel(resp.text)
-            except requests.RequestException as e:
-                print(f"  pid {pid}: request failed ({e})")
-                parsed = None
+            futures = {executor.submit(_fetch_pid, session, town_slug, pid): pid
+                       for pid in batch}
+            results_by_pid = {}
+            for future in concurrent.futures.as_completed(futures):
+                pid, parsed, err = future.result()
+                if err:
+                    print(f"  pid {pid}: request failed ({err})")
+                results_by_pid[pid] = parsed
 
-            if parsed is None:
-                consecutive_misses += 1
-                if consecutive_misses >= max_consecutive_misses:
-                    stopped_early = True
-                    print("=" * 60)
-                    print(f"PASS 1 STOPPED EARLY: {max_consecutive_misses} consecutive misses,")
-                    print(f"last PID checked was {pid} (requested range was {pid_start}-{pid_end})")
-                    print("This is expected/fine -- Pass 2 below will catch real parcels")
-                    print("that live outside this sequential range.")
-                    print("=" * 60)
-                    break
-                continue
+            # Re-walk the batch in real PID order -- as_completed() above
+            # returns whichever finished first, not ascending order, but
+            # the miss-counting/progress-print logic below depends on it.
+            stop = False
+            for pid in batch:
+                parsed = results_by_pid.get(pid)
 
-            consecutive_misses = 0
-            row = {
-                "pid": parsed["pid"] or pid,
-                "location": parsed["location"],
-                "total_market_value": parsed["total_market_value"],
-                "mblu": parsed["mblu"],
-                "acres": parsed["acres"],
-                "land_use_desc": parsed["land_use_desc"],
-                "match_source": "sequential",
-            }
-            writer.writerow(row)
-            rows.append(row)
+                if parsed is None:
+                    consecutive_misses += 1
+                    if max_consecutive_misses is not None and consecutive_misses >= max_consecutive_misses:
+                        stop = True
+                        print("=" * 60)
+                        print(f"[{progress_label}] STOPPED EARLY: {max_consecutive_misses} consecutive "
+                              f"misses, last PID checked was {pid} (requested range was "
+                              f"{pid_start}-{pid_end})")
+                        print("=" * 60)
+                        break
+                    continue
 
-            if pid % 100 == 0:
-                print(f"  ...at pid {pid}, {len(rows)} parcels captured so far")
-
-            time.sleep(0.5)  # polite pacing against a small town's server
-
-    print("=" * 60)
-    if stopped_early:
-        print(f"Pass 1 done (stopped early at pid {last_pid_seen} of requested {pid_end}).")
-    else:
-        print(f"Pass 1 done (completed full range through pid {last_pid_seen}).")
-    print(f"Pass 1: {len(rows)} parcels written to {out_path}")
-    print("=" * 60)
-
-    # ---- Pass 2: targeted lookup for addresses Pass 1 never found ----
-    # Deferred import to avoid a circular import: vgsi_targeted_lookup.py
-    # itself does `from vgsi_assessment_scraper import parse_parcel`. If
-    # this were a top-level import instead, loading either file first would
-    # fail trying to import from the other, which is still mid-loading.
-    # By the time scrape_town() actually runs (this function has already
-    # been fully defined and this module fully loaded), the cycle is safe.
-    from vgsi_targeted_lookup import lookup_and_fetch
-
-    found_locations = [r["location"] for r in rows]
-    missing_addresses = find_missing_addresses(found_locations, granit_geojson_path)
-
-    print(f"PASS 2: {len(missing_addresses)} GRANIT addresses have no match from Pass 1 -- "
-          f"looking each up directly via VGSI's address search...")
-    print("=" * 60)
-
-    targeted_rows = []
-    no_match, ambiguous, failed = [], [], []
-
-    with open(out_path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        for i, address in enumerate(missing_addresses, 1):
-            parsed, status = lookup_and_fetch(town_slug, address)
-            print(f"  [{i}/{len(missing_addresses)}] {address}: {status}"
-                  + (f" (pid {parsed['pid']})" if parsed else ""))
-
-            if status == "no_match":
-                no_match.append(address)
-            elif status.startswith("ambiguous"):
-                ambiguous.append(address)
-            elif status.startswith("search_failed") or status.startswith("fetch_failed"):
-                failed.append(address)
-
-            if parsed:
+                consecutive_misses = 0
                 row = {
-                    "pid": parsed["pid"],
+                    "pid": parsed["pid"] or pid,
                     "location": parsed["location"],
                     "total_market_value": parsed["total_market_value"],
                     "mblu": parsed["mblu"],
                     "acres": parsed["acres"],
                     "land_use_desc": parsed["land_use_desc"],
-                    "match_source": "targeted",
+                    "match_source": match_source,
                 }
                 writer.writerow(row)
-                targeted_rows.append(row)
+                rows.append(row)
 
-            time.sleep(0.3)  # polite pacing, same as vgsi_targeted_lookup.py
+                if pid % 100 == 0:
+                    print(f"  [{progress_label}] ...at pid {pid}, {len(rows)} parcels captured so far")
+
+            if stop:
+                break
+
+    return rows
+
+
+def _group_into_clusters(pids: list[int], gap_threshold: int) -> list[tuple[int, int]]:
+    """
+    Groups discovered PIDs into (min, max) windows -- two PIDs within
+    gap_threshold of each other are treated as belonging to the same
+    real subdivision cluster (same underlying assumption as Pass 1's
+    max_consecutive_misses: a real cluster's PIDs are dense, not scattered
+    lone numbers). A standalone discovered PID with no near neighbor still
+    becomes its own single-PID cluster -- cheap to sweep (with padding,
+    see CLUSTER_WINDOW_PAD) rather than dropped, since a genuine
+    subdivision may still have more members just outside the sample.
+    """
+    if not pids:
+        return []
+    ordered = sorted(set(pids))
+    clusters = []
+    start = prev = ordered[0]
+    for pid in ordered[1:]:
+        if pid - prev <= gap_threshold:
+            prev = pid
+            continue
+        clusters.append((start, prev))
+        start = prev = pid
+    clusters.append((start, prev))
+    return clusters
+
+
+# Heuristic constants for cluster discovery/sweep -- tuned against the
+# one confirmed real example (Lincoln's Crooked Mtn/Friendship Ct/South
+# Peak Rd cluster, PIDs 102686-103011, ~325 PIDs wide) and Lebanon's
+# observed 100000-100100 / 100900+ clusters, but NOT yet validated across
+# a full 40-town run. If a real run's cluster_sweep match_source rows come
+# back suspiciously low relative to how many addresses the sweep was
+# supposed to resolve, raise CLUSTER_DISCOVERY_SAMPLE_SIZE first -- it's
+# the input to everything else here, and a bad sample can't discover a
+# cluster it never got a candidate PID from.
+CLUSTER_DISCOVERY_SAMPLE_SIZE = 20  # how many missing addresses to search first, just to locate clusters
+CLUSTER_GAP_THRESHOLD = 2000        # PIDs within this distance of each other are treated as one cluster
+CLUSTER_WINDOW_PAD = 150            # extra PIDs scanned on each side of a discovered cluster's min/max
+
+
+def scrape_town(town_slug: str, pid_start: int, pid_end: int, granit_geojson_path: str,
+                 out_path: str, max_consecutive_misses: int = 300):
+    """
+    Pass 1: walk PIDs sequentially across [pid_start, pid_end]. VGSI PIDs
+    are dense but not perfectly contiguous (demolished/merged parcels
+    leave gaps), so gaps are tolerated, but the scan bails out after a
+    long consecutive run of misses -- a strong signal we've run past the
+    top of the town's MAIN PID range (not necessarily the top of the
+    town's real PID range -- see Pass 2 below).
+
+    SPEEDUP (2026-08-26): fetched BATCH_SIZE at a time via a bounded
+    MAX_WORKERS thread pool over one shared requests.Session(), instead of
+    one at a time with a blocking time.sleep(0.5) after each. See the
+    module-level comment above BASE/HEADERS.
+
+    Pass 2 -- REDESIGNED (2026-08-26): a real run surfaced the actual
+    bottleneck, and it wasn't Pass 1 at all. Some towns (confirmed:
+    Lebanon) have entire extra subdivisions sitting at PIDs tens of
+    thousands above the main range Pass 1 scans (same phenomenon
+    documented for Lincoln's Crooked Mtn cluster) -- e.g. Lebanon's
+    primary range tops out around pid_end=8000, but real clusters exist
+    at ~100000-100100 and again at ~100900+. The ORIGINAL Pass 2 handled
+    every address in gaps like that with a full search-then-fetch --
+    trying up to a dozen text variants per address (each its own network
+    round trip) before even fetching the matched page. For a hundred-plus
+    addresses in one tight PID cluster, that's enormously more requests
+    than the cluster actually needs.
+
+    New Pass 2 has two stages:
+      2a. CLUSTER SWEEP -- search only a small SAMPLE of the missing
+          addresses (CLUSTER_DISCOVERY_SAMPLE_SIZE) to discover roughly
+          where in PID-space the rest of the missing addresses live, then
+          SEQUENTIALLY SCAN a padded window around each discovered PID
+          cluster using the same fast concurrent batch-fetch Pass 1 uses
+          (_scan_pid_range). One request per PID in the window, no
+          per-address searching -- and it picks up every real parcel in
+          that window, not just the ones that happened to be in the
+          sample.
+      2b. FALLBACK -- whatever's still missing after the sweep (true
+          one-offs; addresses whose PID isn't near any discovered
+          cluster) goes through the original one-by-one address-search
+          path, same as before, just on a hopefully much smaller list.
+    """
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    all_rows: list[dict] = []
+
+    with open(out_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer.writeheader()
+
+        # ---- Pass 1 ----
+        pass1_rows = _scan_pid_range(
+            session, town_slug, writer, pid_start, pid_end,
+            match_source="sequential", max_consecutive_misses=max_consecutive_misses,
+            progress_label=f"Pass 1, pid {pid_start}-{pid_end}",
+        )
+        all_rows.extend(pass1_rows)
+
+        print("=" * 60)
+        print(f"Pass 1 done: {len(pass1_rows)} parcels written to {out_path}")
+        print("=" * 60)
+
+        # ---- Pass 2a: cluster discovery + sweep ----
+        # Deferred import to avoid a circular import: vgsi_targeted_lookup.py
+        # itself does `from vgsi_assessment_scraper import parse_parcel`. By
+        # the time this line runs, this module is already fully loaded, so
+        # the cycle is safe -- see the original module docstring's note on
+        # this same pattern.
+        from vgsi_targeted_lookup import lookup_and_fetch
+
+        found_locations = [r["location"] for r in all_rows]
+        missing_addresses = find_missing_addresses(found_locations, granit_geojson_path)
+
+        print(f"PASS 2a: {len(missing_addresses)} GRANIT addresses have no match from Pass 1 -- "
+              f"sampling up to {CLUSTER_DISCOVERY_SAMPLE_SIZE} to discover any out-of-range "
+              f"PID clusters...")
+        print("=" * 60)
+
+        if missing_addresses:
+            discovery_sample = missing_addresses[:CLUSTER_DISCOVERY_SAMPLE_SIZE]
+            discovered_pids = []
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {
+                    executor.submit(lookup_and_fetch, town_slug, address, session): address
+                    for address in discovery_sample
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    parsed, status = future.result()
+                    if parsed and parsed.get("pid"):
+                        discovered_pids.append(int(parsed["pid"]))
+
+            clusters = _group_into_clusters(discovered_pids, CLUSTER_GAP_THRESHOLD)
+            if clusters:
+                print(f"  discovered {len(clusters)} candidate cluster(s) from "
+                      f"{len(discovery_sample)} sampled address(es): {clusters}")
+                for lo, hi in clusters:
+                    window_lo = max(1, lo - CLUSTER_WINDOW_PAD)
+                    window_hi = hi + CLUSTER_WINDOW_PAD
+                    print(f"  sweeping cluster window pid {window_lo}-{window_hi}...")
+                    swept = _scan_pid_range(
+                        session, town_slug, writer, window_lo, window_hi,
+                        match_source="cluster_sweep", max_consecutive_misses=None,
+                        progress_label=f"cluster {window_lo}-{window_hi}",
+                    )
+                    all_rows.extend(swept)
+                    print(f"  cluster pid {window_lo}-{window_hi}: {len(swept)} parcels captured")
+            else:
+                print("  no candidate clusters discovered from the sample -- "
+                      "every missing address is likely a genuine one-off.")
+        print("=" * 60)
+
+        # ---- Pass 2b: fallback address search for whatever's still missing ----
+        found_locations = [r["location"] for r in all_rows]
+        still_missing = find_missing_addresses(found_locations, granit_geojson_path)
+
+        print(f"PASS 2b: {len(still_missing)} GRANIT addresses still unmatched after the cluster "
+              f"sweep -- looking each up directly via VGSI's address search...")
+        print("=" * 60)
+
+        targeted_rows = []
+        no_match, ambiguous, failed = [], [], []
+
+        # SPEEDUP: same session + MAX_WORKERS pool, instead of one address
+        # at a time with a blocking time.sleep(0.3). Order of the printed
+        # [i/n] lines is no longer guaranteed to match still_missing's
+        # original order (results print as they complete), but every
+        # address is still looked up exactly once and every row still gets
+        # written -- only the console ordering changed, not the output.
+        if still_missing:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {
+                    executor.submit(lookup_and_fetch, town_slug, address, session): address
+                    for address in still_missing
+                }
+                for i, future in enumerate(concurrent.futures.as_completed(futures), 1):
+                    address = futures[future]
+                    parsed, status = future.result()
+                    print(f"  [{i}/{len(still_missing)}] {address}: {status}"
+                          + (f" (pid {parsed['pid']})" if parsed else ""))
+
+                    if status == "no_match":
+                        no_match.append(address)
+                    elif status.startswith("ambiguous"):
+                        ambiguous.append(address)
+                    elif status.startswith("search_failed") or status.startswith("fetch_failed"):
+                        failed.append(address)
+
+                    if parsed:
+                        row = {
+                            "pid": parsed["pid"],
+                            "location": parsed["location"],
+                            "total_market_value": parsed["total_market_value"],
+                            "mblu": parsed["mblu"],
+                            "acres": parsed["acres"],
+                            "land_use_desc": parsed["land_use_desc"],
+                            "match_source": "targeted",
+                        }
+                        writer.writerow(row)
+                        targeted_rows.append(row)
+
+    all_rows.extend(targeted_rows)
 
     print("=" * 60)
-    print(f"Pass 2 done: {len(targeted_rows)} / {len(missing_addresses)} matched and appended.")
+    print(f"Pass 2b done: {len(targeted_rows)} / {len(still_missing)} matched and appended.")
     print(f"  no_match: {len(no_match)}")
     print(f"  ambiguous (took first result -- spot check these): {len(ambiguous)}")
     print(f"  failed (request/parse error): {len(failed)}")
@@ -345,11 +568,10 @@ def scrape_town(town_slug: str, pid_start: int, pid_end: int, granit_geojson_pat
         for a in sample:
             print(f"    {a}")
     print("=" * 60)
-    print(f"FINAL: {len(rows) + len(targeted_rows)} total parcels written to {out_path} "
-          f"({len(rows)} sequential + {len(targeted_rows)} targeted).")
+    print(f"FINAL: {len(all_rows)} total parcels written to {out_path}.")
     print("=" * 60)
 
-    return rows + targeted_rows
+    return all_rows
 
 
 def main():
