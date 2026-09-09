@@ -1,4 +1,5 @@
 import sys, csv, time, json, re
+import threading
 import requests
 from vgsi_assessment_scraper import parse_parcel, normalize_address
 
@@ -9,6 +10,24 @@ HEADERS = {
     "Content-Type": "application/json; charset=UTF-8",
     "X-Requested-With": "XMLHttpRequest",
 }
+
+_thread_local = threading.local()
+
+
+def _get_thread_session() -> requests.Session:
+    """
+    ADDED 2026-08-30: matches vgsi_assessment_scraper._get_thread_session
+    -- one requests.Session per worker thread, not a shared one passed in
+    from the caller. This file previously accepted an optional `session`
+    param and fell back to the plain `requests` module (a fresh connection
+    per call) when none was given, which meant it depended on the caller
+    to have gotten connection-sharing right. Now self-sufficient either
+    way -- see vgsi_assessment_scraper.py's fix for why a single shared
+    Session() across concurrent threads is the thing to avoid.
+    """
+    if not hasattr(_thread_local, "session"):
+        _thread_local.session = requests.Session()
+    return _thread_local.session
 
 DIRECTIONAL_EXPAND = {"N": "NORTH", "S": "SOUTH", "E": "EAST", "W": "WEST"}
 DIRECTIONAL_ABBREV = {v: k for k, v in DIRECTIONAL_EXPAND.items()}
@@ -37,27 +56,20 @@ def address_variants(address):
     return [address] + variants
 
 
-def search_address(town_slug, address, session=None):
-    # session is optional -- SPEEDUP (2026-08-26): vgsi_assessment_scraper.py
-    # now passes its own shared requests.Session() through here so Pass 2
-    # reuses the same connection Pass 1 already opened, instead of every
-    # call opening a fresh TCP+TLS connection. Falls back to the plain
-    # `requests` module (module-level connection-per-call, same as before)
-    # so this file still works standalone -- see this module's own intended
-    # command-line/standalone usage.
-    client = session or requests
-    resp = client.post(SEARCH_URL.format(town=town_slug), headers=HEADERS,
-                        data=json.dumps({"inVal": address, "src": "i_address"}), timeout=15)
+def search_address(town_slug, address):
+    session = _get_thread_session()
+    resp = session.post(SEARCH_URL.format(town=town_slug), headers=HEADERS,
+                         data=json.dumps({"inVal": address, "src": "i_address"}), timeout=15)
     resp.raise_for_status()
     return resp.json().get("d", [])
 
 
-def _fetch_and_parse(town_slug, pid, session=None):
+def _fetch_and_parse(town_slug, pid):
     """Returns (parsed_or_None, error_string_or_None)."""
-    client = session or requests
+    session = _get_thread_session()
     try:
-        resp = client.get(PARCEL_URL.format(town=town_slug, pid=pid),
-                           headers={"User-Agent": HEADERS["User-Agent"]}, timeout=15)
+        resp = session.get(PARCEL_URL.format(town=town_slug, pid=pid),
+                            headers={"User-Agent": HEADERS["User-Agent"]}, timeout=15)
         resp.raise_for_status()
         parsed = parse_parcel(resp.text)
     except requests.RequestException as e:
@@ -68,7 +80,7 @@ def _fetch_and_parse(town_slug, pid, session=None):
     return parsed, None
 
 
-def lookup_and_fetch(town_slug, address, session=None):
+def lookup_and_fetch(town_slug, address):
     """
     Search variants until one resolves cleanly, PREFERRING a variant whose
     candidates include an exact normalized-text match over one that only
@@ -100,7 +112,7 @@ def lookup_and_fetch(town_slug, address, session=None):
 
     for variant in address_variants(address):
         try:
-            matches = search_address(town_slug, variant, session)
+            matches = search_address(town_slug, variant)
         except requests.RequestException as e:
             return None, f"search_failed: {e}"
 
@@ -118,7 +130,7 @@ def lookup_and_fetch(town_slug, address, session=None):
             status = "ok"
             if variant != address:
                 status += f' (via "{variant}")'
-            parsed, err = _fetch_and_parse(town_slug, chosen["id"], session)
+            parsed, err = _fetch_and_parse(town_slug, chosen["id"])
             if err:
                 return None, err
             return parsed, status
@@ -135,7 +147,7 @@ def lookup_and_fetch(town_slug, address, session=None):
         status += f' (via "{fallback_variant}")'
     candidate_summary = "; ".join(m.get("value", "?") for m in fallback_matches[:5])
     status += f" -- candidates: [{candidate_summary}]"
-    parsed, err = _fetch_and_parse(town_slug, fallback_matches[0]["id"], session)
+    parsed, err = _fetch_and_parse(town_slug, fallback_matches[0]["id"])
     if err:
         return None, err
     return parsed, status

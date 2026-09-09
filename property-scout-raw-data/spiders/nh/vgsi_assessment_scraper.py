@@ -70,7 +70,9 @@ Usage:
 
 import sys
 import csv
+import os
 import re
+import time
 import requests
 import json
 import concurrent.futures
@@ -158,20 +160,19 @@ def parse_parcel(html: str) -> dict | None:
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text(separator="\n")
 
-    # FIXED (this pass): the previous gate checked only for "PID" as
-    # visible text, which was correct for the redesigned layout (confirmed
-    # via Amherst) but wrong for towns still on VGSI's OLD layout --
-    # CONFIRMED via Manchester, PID 29475 ("352 W Haven Rd"): "PID" never
-    # appears as visible text on the old layout at all, even though the
-    # page is a completely valid, fully populated parcel record (contains
-    # "Location", "Total Market Value", and "Assessment"). The old gate
-    # was silently discarding every good record from towns like this,
-    # which is what inflated Manchester's Pass 2b fallback to 28,132
-    # addresses -- most of those were never actually missing from VGSI.
+    # FIXED 2026-08-30: the 2026-08-25 fix gated validity on "PID" being
+    # present as visible text, which is correct for the redesigned layout
+    # (confirmed via Amherst) but WRONG for towns still on VGSI's OLD
+    # layout -- CONFIRMED via Manchester, PID 29475 ("352 W Haven Rd"):
+    # "PID" never appears as visible text there at all, even though the
+    # page is a completely valid, fully populated record. This was
+    # silently discarding every real record from any town still on the
+    # old layout (Manchester alone: ~28,000 GRANIT addresses wrongly
+    # fell through to the slow Pass 2b fallback because of this).
     #
-    # New gate accepts either layout: "Location" is present on both, and
-    # "Total Market Value" (old) / "Assessment" (new) confirm it's a real
-    # populated record and not a blank/error page.
+    # New gate accepts either layout: "Location" is present on both
+    # layouts; "Total Market Value" (old) / "Assessment" (new) confirms
+    # it's a real populated record and not a blank/error page.
     if "Location" not in text and "Total Market Value" not in text and "Assessment" not in text:
         return None
 
@@ -186,16 +187,6 @@ def parse_parcel(html: str) -> dict | None:
     # is far more reliable than matching the shape of an address.
     location_m = re.search(r"Location\s*\n+\s*(.+?)\s*\n", text)
 
-    # FIXED (this pass): try the OLD layout's label first ("Total Market
-    # Value" -- CONFIRMED present and followed by a dollar figure on
-    # Manchester PID 29475), falling back to the NEW layout's first
-    # "Assessment" occurrence (CONFIRMED via Amherst) if the old label
-    # isn't there. Checking the more specific "Total Market Value" string
-    # first avoids any risk of it matching something unintended on a new-
-    # layout page that happens to also contain the word "Assessment"
-    # elsewhere before the real value.
-    total_market_value = grab("Total Market Value") or grab("Assessment")
-
     # The Land Use section has a "Description" field (e.g. "Single Family",
     # "Residential Land") -- this is the assessor's own plain-English
     # classification, confirmed against PID 3813 (Description: Single
@@ -209,23 +200,53 @@ def parse_parcel(html: str) -> dict | None:
         desc_m = re.search(r"Description\s*\n+\s*(.+?)\s*\n", land_use_section[1])
         if desc_m:
             land_use_desc = standardize_land_use(desc_m.group(1).strip())
-
     return {
         "location": location_m.group(1).strip() if location_m else None,
-        "total_market_value": total_market_value,
-        # NOTE: "pid" will legitimately come back None on old-layout pages,
-        # since that label simply isn't rendered as visible text there --
-        # this is expected, not a bug. Every caller already has a fallback:
-        # _scan_pid_range uses `parsed["pid"] or pid` (the PID it already
-        # knows from the loop), and vgsi_targeted_lookup._fetch_and_parse
-        # overwrites parsed["pid"] = pid from the search result. Nothing
-        # downstream depends on this regex succeeding.
+        # FIXED 2026-08-30: try the OLD layout's label first ("Total
+        # Market Value" -- CONFIRMED present and followed by a dollar
+        # figure on Manchester PID 29475), falling back to the NEW
+        # layout's first "Assessment" occurrence (CONFIRMED via Amherst,
+        # right after Owner, before PID) if the old label isn't present.
+        # Checking the more specific "Total Market Value" string first
+        # avoids any risk of it matching something unintended on a
+        # new-layout page that happens to also contain "Assessment"
+        # elsewhere before the real value.
+        "total_market_value": grab("Total Market Value") or grab("Assessment"),
+        # NOTE: legitimately comes back None on old-layout pages, since
+        # that label simply isn't rendered as visible text there -- this
+        # is expected, not a bug. Both callers already fall back to the
+        # PID they already know: _scan_pid_range uses `parsed["pid"] or
+        # pid` (the loop's own PID), and vgsi_targeted_lookup's
+        # _fetch_and_parse overwrites parsed["pid"] = pid from the
+        # search result. Nothing downstream depends on this succeeding.
         "pid": grab("PID", r"(\d+)"),
         "mblu": grab("Mblu", r"([\d/ ]+)"),
         "land_use_desc": land_use_desc,
         "acres": grab("Size (Acres)", r"([\d.]+)"),
         "raw_text_ok": True,
     }
+
+
+def probe_layout(town_slug: str,
+                  probe_pids: tuple[int, ...] = (1, 2, 3, 5, 10)) -> bool:
+    """
+    ADDED 2026-08-30: cheap pre-flight check, meant to be called before
+    committing to a full scrape_town() run. Fetches a handful of low PIDs
+    and confirms at least one parses successfully. Both parse_parcel()
+    layout variants are now handled (see its docstring), so this mainly
+    catches a THIRD, not-yet-seen layout, a wrong town_slug, or the site
+    being unreachable -- cases where the whole run is doomed regardless of
+    which parser branch runs. Costs ~5 requests instead of discovering the
+    problem 28,000 requests into Pass 2b.
+
+    Returns True if at least one probe PID parses; False otherwise (caller
+    should abort/warn rather than proceed).
+    """
+    for pid in probe_pids:
+        _, parsed, _ = _fetch_pid(town_slug, pid)
+        if parsed:
+            return True
+    return False
 
 
 def find_missing_addresses(found_locations: list[str], granit_geojson_path: str) -> list[str]:
@@ -253,23 +274,102 @@ def find_missing_addresses(found_locations: list[str], granit_geojson_path: str)
     return [expected_by_key[k] for k in missing_keys]
 
 
-def _fetch_pid(session: requests.Session, town_slug: str, pid: int):
+import threading
+
+_thread_local = threading.local()
+
+
+def _get_thread_session() -> requests.Session:
+    """
+    ADDED 2026-08-30: one requests.Session per worker thread, not one
+    shared across all of them.
+
+    A single shared Session()'s connection pool is not fully safe under
+    concurrent use against a stateful backend the way you'd want -- under
+    sustained concurrent load, requests can end up serialized behind each
+    other on shared connection/session state. That matches Newington's
+    symptom exactly: fine for ~500 requests, then a specific point where
+    latency degrades and NEVER recovers even after a 60s pause (a pause
+    clears genuine server-side rate limiting, but not a backed-up shared
+    client-side connection state). This is also the documented root cause
+    of a near-identical failure mode this project hit before (see prior
+    session notes: ASP.NET session-lock contention under a shared
+    Session() causing HTTP 500 storms) -- this is the fix for that class
+    of problem, just not yet applied to this file until now.
+    """
+    if not hasattr(_thread_local, "session"):
+        _thread_local.session = requests.Session()
+        _thread_local.session.headers.update(HEADERS)
+    return _thread_local.session
+
+
+class VGSIRequestStorm(Exception):
+    """
+    ADDED 2026-08-30: raised when a sustained burst of request errors
+    indicates the server (or our connection to it) is in a genuinely bad
+    state -- not scattered transient noise. CONFIRMED via a real Newington
+    run: isolated timeouts at PID ~515 progressively thickened until PIDs
+    588-600 were failing almost universally, with retries (3 attempts
+    each) not helping at all -- because retries add MORE requests during
+    exactly the window the server is struggling, which is the wrong
+    response to sustained degradation as opposed to one-off blips.
+
+    Per this project's own principle (see spiders/nh module docs):
+    aborting loudly on a request storm is preferable to grinding through
+    a doomed range and producing quietly-incomplete data with inflated
+    "missing" counts.
+    """
+    pass
+
+
+# A request error (timeout, connection reset, etc.) is tracked separately
+# from a genuine "no such parcel" miss -- conflating the two (as the
+# original consecutive_misses counter did) means a run of network errors
+# looks identical to a run past the real top of a town's PID range, which
+# can trigger Pass 1's early-stop for the wrong reason.
+STORM_WINDOW = 30            # look at the last N fetch attempts (across the whole scan, not per-batch)
+STORM_ERROR_THRESHOLD = 0.5  # if >=50% of the last STORM_WINDOW attempts errored, pause and reassess
+STORM_COOLDOWN_SECONDS = 60  # how long to pause before trying to resume after tripping
+STORM_MAX_COOLDOWNS = 2      # if the error rate is still bad after this many cooldowns, give up and raise
+
+
+def _fetch_pid(town_slug: str, pid: int, max_attempts: int = 3):
     """
     Fetch + parse one PID. Returns (pid, parsed_or_None, error_or_None) --
     always returns the pid so results can be re-sorted back into order
     after concurrent.futures.as_completed() returns them out of order.
+
+    Uses a per-thread session (see _get_thread_session) rather than a
+    session passed in from the caller -- when this runs inside a
+    ThreadPoolExecutor, each worker thread gets its own connection, no
+    shared state across concurrent requests.
+
+    Retries transient errors with backoff AND an escalating timeout --
+    CONFIRMED via two separate Newington runs that the same narrow PID
+    band (roughly 500-600+) times out and, notably, does NOT recover
+    even after a storm cooldown -- consistent with a shared-session
+    connection issue (see _get_thread_session) rather than either slow
+    server-side rendering or simple rate limiting, both of which a pause
+    should have cleared.
     """
+    session = _get_thread_session()
     url = BASE.format(town=town_slug, pid=pid)
-    try:
-        resp = session.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        parsed = parse_parcel(resp.text)
-    except requests.RequestException as e:
-        return pid, None, str(e)
-    return pid, parsed, None
+    last_err = None
+    for attempt in range(1, max_attempts + 1):
+        timeout = 15 * attempt  # 15s, 30s, 45s
+        try:
+            resp = session.get(url, headers=HEADERS, timeout=timeout)
+            resp.raise_for_status()
+            parsed = parse_parcel(resp.text)
+            return pid, parsed, None
+        except requests.RequestException as e:
+            last_err = str(e)
+            if attempt < max_attempts:
+                time.sleep(0.5 * attempt)  # 0.5s, then 1.0s
+    return pid, None, f"{last_err} (after {max_attempts} attempts, up to {15 * max_attempts}s timeout)"
 
 
-def _scan_pid_range(session: requests.Session, town_slug: str, writer: csv.DictWriter,
+def _scan_pid_range(town_slug: str, writer: csv.DictWriter,
                      pid_start: int, pid_end: int, match_source: str,
                      max_consecutive_misses: int | None, progress_label: str) -> list[dict]:
     """
@@ -289,30 +389,95 @@ def _scan_pid_range(session: requests.Session, town_slug: str, writer: csv.DictW
     split out here -- pulled into its own function so the cluster sweep
     (see scrape_town()) can reuse it on arbitrary PID windows instead of
     only the one primary range.
+
+    FIXED 2026-08-30 (two related issues, both surfaced by a real
+    Newington run):
+
+    1. consecutive_misses used to increment on ANY parsed-is-None result,
+       whether that meant "genuinely no parcel at this PID" or "the
+       request errored out." A run of network errors therefore looked
+       identical to walking past the real top of a town's PID range, and
+       could trigger Pass 1's early-stop for entirely the wrong reason.
+       Request errors are now tracked separately (see failed_pids) and no
+       longer touch consecutive_misses at all.
+
+    2. No mechanism previously existed to notice that errors were
+       CLUSTERING -- CONFIRMED via Newington: isolated timeouts around
+       PID 515 progressively thickened into near-total failure by PID
+       590-600. Per-request retry (see _fetch_pid) doesn't help this
+       shape of problem; it just adds more requests during exactly the
+       window the server's struggling. See VGSIRequestStorm's docstring.
+       A rolling window now tracks the recent error RATE across the whole
+       scan; if it spikes, the scan pauses for STORM_COOLDOWN_SECONDS and
+       resets the window. If the rate is still bad after
+       STORM_MAX_COOLDOWNS attempts, it raises VGSIRequestStorm rather
+       than continuing to grind through what's likely a doomed range.
     """
     rows = []
+    failed_pids = []  # PIDs that errored (not genuine misses) -- for a possible later retry pass
     consecutive_misses = 0
+    recent_error_flags: list[bool] = []  # rolling window, oldest at index 0
+    cooldowns_used = 0
     pid_range = list(range(pid_start, pid_end + 1))
+    last_pid_checked = pid_start - 1  # ADDED for history tracking -- see this function's return value
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         for batch_start in range(0, len(pid_range), BATCH_SIZE):
             batch = pid_range[batch_start: batch_start + BATCH_SIZE]
 
-            futures = {executor.submit(_fetch_pid, session, town_slug, pid): pid
+            futures = {executor.submit(_fetch_pid, town_slug, pid): pid
                        for pid in batch}
             results_by_pid = {}
             for future in concurrent.futures.as_completed(futures):
                 pid, parsed, err = future.result()
                 if err:
                     print(f"  pid {pid}: request failed ({err})")
-                results_by_pid[pid] = parsed
+                    failed_pids.append(pid)
+                results_by_pid[pid] = (parsed, err)
 
             # Re-walk the batch in real PID order -- as_completed() above
             # returns whichever finished first, not ascending order, but
             # the miss-counting/progress-print logic below depends on it.
             stop = False
             for pid in batch:
-                parsed = results_by_pid.get(pid)
+                parsed, err = results_by_pid.get(pid, (None, None))
+                last_pid_checked = pid  # ADDED for history tracking, updated regardless of hit/miss/error
+
+                recent_error_flags.append(bool(err))
+                if len(recent_error_flags) > STORM_WINDOW:
+                    recent_error_flags.pop(0)
+
+                if len(recent_error_flags) == STORM_WINDOW:
+                    error_rate = sum(recent_error_flags) / STORM_WINDOW
+                    if error_rate >= STORM_ERROR_THRESHOLD:
+                        if cooldowns_used >= STORM_MAX_COOLDOWNS:
+                            raise VGSIRequestStorm(
+                                f"[{progress_label}] error rate stayed at/above "
+                                f"{STORM_ERROR_THRESHOLD:.0%} over the last {STORM_WINDOW} "
+                                f"requests even after {cooldowns_used} cooldown(s) of "
+                                f"{STORM_COOLDOWN_SECONDS}s each, last PID checked was {pid}. "
+                                f"This looks like sustained throttling/blocking, not transient "
+                                f"noise -- aborting rather than grinding through the rest of "
+                                f"{pid_start}-{pid_end} producing unreliable data."
+                            )
+                        print("=" * 60)
+                        print(f"[{progress_label}] STORM DETECTED: {error_rate:.0%} error rate "
+                              f"over the last {STORM_WINDOW} requests (last PID {pid}). "
+                              f"Pausing {STORM_COOLDOWN_SECONDS}s before resuming "
+                              f"(cooldown {cooldowns_used + 1}/{STORM_MAX_COOLDOWNS})...")
+                        print("=" * 60)
+                        time.sleep(STORM_COOLDOWN_SECONDS)
+                        recent_error_flags = []
+                        cooldowns_used += 1
+                        # NOTE: the rest of this batch was already fetched
+                        # (the whole batch is submitted concurrently before
+                        # this per-PID loop runs) -- `continue` here uses
+                        # those already-fetched results instead of
+                        # discarding them, no wasted requests.
+                        continue
+
+                if err:
+                    continue  # request error -- already logged/tracked above, not a genuine miss
 
                 if parsed is None:
                     consecutive_misses += 1
@@ -345,10 +510,20 @@ def _scan_pid_range(session: requests.Session, town_slug: str, writer: csv.DictW
             if stop:
                 break
 
-    return rows
+    if failed_pids:
+        print(f"  [{progress_label}] {len(failed_pids)} PID(s) errored out after retries and were "
+              f"NOT counted as misses -- true status unknown, consider a follow-up pass: "
+              f"{failed_pids[:20]}{'...' if len(failed_pids) > 20 else ''}")
+
+    # CHANGED for history tracking: now returns (rows, last_pid_checked) instead of
+    # just rows -- last_pid_checked is the boundary of what was actually scanned
+    # (whether the range completed or an early-stop/consecutive-miss triggered),
+    # which is what gets persisted as sequenced_range.high / a cluster window's
+    # hi for a future run's history replay. All call sites updated accordingly.
+    return rows, last_pid_checked
 
 
-def _group_into_clusters(pids: list[int], gap_threshold: int) -> list[tuple[int, int]]:
+def _group_into_clusters(pids: list[int], gap_threshold: int, max_span: int = 1500) -> list[tuple[int, int]]:
     """
     Groups discovered PIDs into (min, max) windows -- two PIDs within
     gap_threshold of each other are treated as belonging to the same
@@ -358,6 +533,18 @@ def _group_into_clusters(pids: list[int], gap_threshold: int) -> list[tuple[int,
     becomes its own single-PID cluster -- cheap to sweep (with padding,
     see CLUSTER_WINDOW_PAD) rather than dropped, since a genuine
     subdivision may still have more members just outside the sample.
+
+    FIXED 2026-08-30: previously only checked the gap to the immediately
+    PRECEDING pid, which allows unbounded transitive chaining -- CONFIRMED
+    via a real run that produced a single cluster spanning PIDs
+    99994-104493 (4,499 wide) even with gap_threshold=2000, because every
+    individual link in the chain happened to be under 2000 even though the
+    cumulative span was enormous. Both confirmed real clusters this was
+    tuned against (Lincoln: 325 wide, Lebanon: ~100-200 wide) are well
+    under max_span=1500 -- anything wider than that is far more likely to
+    be an accidental chain (or a bad/ambiguous address match pulling in an
+    unrelated PID) than one real dense subdivision, and sweeping it wastes
+    hours checking thousands of speculative PIDs that mostly don't exist.
     """
     if not pids:
         return []
@@ -365,7 +552,7 @@ def _group_into_clusters(pids: list[int], gap_threshold: int) -> list[tuple[int,
     clusters = []
     start = prev = ordered[0]
     for pid in ordered[1:]:
-        if pid - prev <= gap_threshold:
+        if pid - prev <= gap_threshold and pid - start <= max_span:
             prev = pid
             continue
         clusters.append((start, prev))
@@ -387,16 +574,366 @@ CLUSTER_DISCOVERY_SAMPLE_SIZE = 20  # how many missing addresses to search first
 CLUSTER_GAP_THRESHOLD = 2000        # PIDs within this distance of each other are treated as one cluster
 CLUSTER_WINDOW_PAD = 150            # extra PIDs scanned on each side of a discovered cluster's min/max
 
+# ADDED: separate, much tighter gap threshold used ONLY when re-deriving
+# cluster windows from a previous run's CSV (_load_pid_history_from_csv),
+# as opposed to CLUSTER_GAP_THRESHOLD's use in LIVE discovery
+# (_group_into_clusters called on a small SAMPLE of freshly-searched
+# addresses, scrape_town's Pass 2a). Those are different situations:
+# live discovery only has a handful of sampled points and has to guess
+# generously at a whole cluster's shape from them, so a wide 2000-PID
+# tolerance is the right call there. CSV reconstruction, by contrast,
+# already has EVERY real hit PID from last run -- no sampling risk to
+# guard against -- so a wide tolerance just merges separate subdivisions
+# that happen to be within 2000 PIDs of each other into one bloated
+# window. CONFIRMED via a real Strafford run: reconstructing with
+# CLUSTER_GAP_THRESHOLD=2000 produced two windows that replayed 1801 and
+# 1719 PIDs for only 165 and 114 real hits respectively (>90% wasted
+# requests, ~3200 PIDs fetched for nothing). A much tighter threshold
+# here still correctly bounds one real cluster (built from its actual
+# hits, not a sample), while no longer bridging across genuinely
+# separate ones.
+CLUSTER_RECONSTRUCT_GAP_THRESHOLD = 300
+
+# ADDED: density threshold for deciding HOW to replay a reconstructed
+# cluster. A cluster sweep -- whether triggered by fresh Pass 2a discovery
+# or replayed from history -- costs the SAME number of requests either
+# way: one per PID in the window. History replay only ever saves the
+# DISCOVERY step that precedes a fresh sweep (a handful of address-search
+# requests), never the sweep itself. That means replaying a SPARSE
+# cluster as a padded window is nearly pure overhead -- CONFIRMED via a
+# real Strafford run where three reconstructed windows replayed 1801,
+# 1791, and 323 PIDs for only 165, 129, and 72 real hits (9%, 7%, 22%
+# density) -- 3,915 requests for 366 real parcels.
+#
+# Below this density, a cluster's KNOWN hit PIDs are folded into
+# targeted_pids instead of kept as a window -- replayed as an exact list
+# (_fetch_pid_list with no padding/gaps), same as any other targeted PID.
+# That turns e.g. the 1801-wide/165-hit case into a 165-request direct
+# fetch, an ~91% cut for that cluster specifically. The trade-off: a
+# BRAND NEW parcel added inside that cluster's dead space between runs
+# won't be caught by this direct-list replay -- but it's still caught the
+# normal way the very first time its GRANIT address shows up as
+# unmatched (Pass 2a/2b), same as any other new address in town; the only
+# cost is that one occurrence goes through fresh discovery once, not that
+# it's missed forever. At/above this density, a cluster is kept as a
+# padded window as before, since there's little sparse dead space to cut
+# and windowing still catches in-fill growth for free on every replay.
+CLUSTER_REPLAY_DENSITY_THRESHOLD = 0.3
+
+
+def _range_fully_covered(lo: int, hi: int, covered: list[tuple[int, int]]) -> bool:
+    """
+    True if every PID in [lo, hi] falls within a SINGLE already-scanned
+    range in `covered`. Deliberately doesn't try to stitch together
+    partial coverage from multiple adjacent ranges -- exact single-range
+    containment is enough for what this guards against (see
+    scrape_town's use in Pass 2a): a cluster window landing entirely
+    inside a range the sequenced replay/Pass 1 or growth probe already
+    scanned this run.
+
+    ADDED after a real Manchester run: once the growth probe (see
+    GROWTH_PROBE_WIDTH's docstring) could scan much wider ranges, Pass 2a
+    started rediscovering and re-sweeping windows the growth probe had
+    JUST finished scanning moments earlier -- CONFIRMED: a 1,738-request
+    cluster sweep of 28081-29865 was entirely redundant with a growth
+    probe scan of 21807-30793 that had already covered every PID in it.
+    The dedup writer kept the output CSV clean, but the network requests
+    were still made twice. Root cause: those addresses stay on Pass 2a's
+    "missing" list even after their PID is scanned, because GRANIT's
+    StreetAddress field for them is road-name-only (e.g. "STRAW RD", not
+    "497 STRAW RD") -- find_missing_addresses can't text-match that to
+    anything, regardless of whether the PID itself was already fetched.
+    """
+    return any(c_lo <= lo and hi <= c_hi for c_lo, c_hi in covered)
+
+
+def _group_pids_with_members(pids: list[int], gap_threshold: int,
+                              max_span: int = 1500) -> list[list[int]]:
+    """
+    Same grouping logic as _group_into_clusters, but returns each group's
+    actual member PIDs (not just its (lo, hi) bounds) -- needed to
+    compute per-cluster hit density in _load_pid_history_from_csv, which
+    _group_into_clusters' (lo, hi)-only return can't support.
+    """
+    if not pids:
+        return []
+    ordered = sorted(set(pids))
+    groups = [[ordered[0]]]
+    for pid in ordered[1:]:
+        if pid - groups[-1][-1] <= gap_threshold and pid - groups[-1][0] <= max_span:
+            groups[-1].append(pid)
+        else:
+            groups.append([pid])
+    return groups
+
+# ADDED: PID-history replay support. A monthly re-run of a town whose PID
+# layout is already known (from a prior run's history file) shouldn't have
+# to re-walk a blind 1..pid_end range or re-run per-address VGSI searches
+# for parcels we already know the PID of -- it can just re-fetch each known
+# PID directly (one request each, no address-search variants). See
+# _fetch_pid_list / _load_pid_history / _save_pid_history / scrape_town.
+GROWTH_PROBE_WIDTH = 2000       # how far past the last known sequenced-range high to probe for new growth
+GROWTH_PROBE_MAX_MISSES = 100   # smaller than Pass 1's max_consecutive_misses -- just confirming growth
+                                 # stopped again, not discovering a whole fresh range from scratch
+
+
+def _fetch_pid_list(town_slug: str, writer: csv.DictWriter, pids, match_source: str,
+                     progress_label: str) -> tuple[list[dict], list[int]]:
+    """
+    Fetch a specific, possibly-noncontiguous collection of PIDs concurrently
+    (accepts any iterable of ints, e.g. a range() or an explicit list).
+
+    Unlike _scan_pid_range, a parsed=None result here is NOT a signal to
+    stop -- these PIDs are being REPLAYED from a previous run's history
+    (sequenced_range / cluster_windows / targeted_pids), so the large
+    majority are expected to still hit. A miss just means that specific
+    parcel was merged, demolished, or renumbered since the last run --
+    normal month-to-month turnover, not a sign we've walked off the end of
+    the town's real PID range. There is no "end" to walk off of here: the
+    input is exactly the set of PIDs we already know about.
+
+    Keeps the same request-storm circuit breaker _scan_pid_range uses,
+    since a sustained burst of connection errors is still a sign something
+    is wrong with the server/connection regardless of why this particular
+    PID list was assembled.
+
+    Returns (rows_written, missing_pids) -- missing_pids is every PID in
+    the input that did NOT resolve to a real parcel this time (miss,
+    error, or dropped during a storm cooldown), so the caller can report
+    how much churn happened since the last run (e.g. "14 of 812 replayed
+    PIDs no longer resolve") and so scrape_town can decide what to keep in
+    the rewritten history file.
+    """
+    rows: list[dict] = []
+    missing_pids: list[int] = []
+    recent_error_flags: list[bool] = []
+    cooldowns_used = 0
+    pids = list(pids)
+    total = len(pids)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        for batch_start in range(0, total, BATCH_SIZE):
+            batch = pids[batch_start: batch_start + BATCH_SIZE]
+            futures = {executor.submit(_fetch_pid, town_slug, pid): pid for pid in batch}
+            results_by_pid = {}
+            for future in concurrent.futures.as_completed(futures):
+                pid, parsed, err = future.result()
+                if err:
+                    print(f"  [{progress_label}] pid {pid}: request failed ({err})")
+                results_by_pid[pid] = (parsed, err)
+
+            for pid in batch:
+                parsed, err = results_by_pid.get(pid, (None, None))
+
+                recent_error_flags.append(bool(err))
+                if len(recent_error_flags) > STORM_WINDOW:
+                    recent_error_flags.pop(0)
+                if len(recent_error_flags) == STORM_WINDOW:
+                    error_rate = sum(recent_error_flags) / STORM_WINDOW
+                    if error_rate >= STORM_ERROR_THRESHOLD:
+                        if cooldowns_used >= STORM_MAX_COOLDOWNS:
+                            raise VGSIRequestStorm(
+                                f"[{progress_label}] error rate stayed at/above "
+                                f"{STORM_ERROR_THRESHOLD:.0%} over the last {STORM_WINDOW} "
+                                f"requests even after {cooldowns_used} cooldown(s), last pid "
+                                f"checked was {pid}. Aborting replay rather than grinding "
+                                f"through the rest of the known-pid list producing unreliable "
+                                f"data."
+                            )
+                        print("=" * 60)
+                        print(f"[{progress_label}] STORM DETECTED: {error_rate:.0%} error rate "
+                              f"over the last {STORM_WINDOW} requests (last pid {pid}). "
+                              f"Pausing {STORM_COOLDOWN_SECONDS}s before resuming "
+                              f"(cooldown {cooldowns_used + 1}/{STORM_MAX_COOLDOWNS})...")
+                        print("=" * 60)
+                        time.sleep(STORM_COOLDOWN_SECONDS)
+                        recent_error_flags = []
+                        cooldowns_used += 1
+                        continue
+
+                if err:
+                    missing_pids.append(pid)
+                    continue
+
+                if parsed is None:
+                    missing_pids.append(pid)
+                    continue
+
+                row = {
+                    "pid": parsed["pid"] or pid,
+                    "location": parsed["location"],
+                    "total_market_value": parsed["total_market_value"],
+                    "mblu": parsed["mblu"],
+                    "acres": parsed["acres"],
+                    "land_use_desc": parsed["land_use_desc"],
+                    "match_source": match_source,
+                }
+                writer.writerow(row)
+                rows.append(row)
+
+            checked_so_far = batch_start + len(batch)
+            if (batch_start // BATCH_SIZE) % 10 == 0 or checked_so_far >= total:
+                print(f"  [{progress_label}] ...{checked_so_far}/{total} pids checked, "
+                      f"{len(rows)} parcels captured so far")
+
+    return rows, missing_pids
+
+
+class _DedupWriter:
+    """
+    Thin wrapper around a csv.DictWriter that skips a row if its 'pid' was
+    already written earlier in THIS run.
+
+    ADDED alongside CSV-derived history: once cluster windows can be
+    re-discovered every run (via _load_pid_history_from_csv below) rather
+    than persisted verbatim, a replayed window and a freshly (re)discovered
+    window for the same real cluster can end up overlapping -- both get
+    scanned, and without this guard the same PID would get written to the
+    output CSV twice in one run. Duplicate rows would then also inflate
+    the *next* run's cluster-window reconstruction (though not by much,
+    since _group_into_clusters dedupes via set() -- this is about keeping
+    the CSV itself clean for whatever reads it downstream, e.g.
+    join_parcels_assessments.py).
+
+    writerow() returns True if the row was actually written, False if it
+    was a duplicate and skipped -- callers use this to decide whether to
+    count the row (e.g. append it to their own `rows` list).
+    """
+    def __init__(self, inner_writer: csv.DictWriter):
+        self._inner = inner_writer
+        self.seen_pids: set[str] = set()
+
+    def writerow(self, row: dict) -> bool:
+        pid = str(row.get("pid"))
+        if pid in self.seen_pids:
+            return False
+        self.seen_pids.add(pid)
+        self._inner.writerow(row)
+        return True
+
+
+def _load_pid_history_from_csv(csv_path: str, pid_start: int) -> dict | None:
+    """
+    Reconstruct the same 'known PID index' a separate history file would
+    hold, directly from a PREVIOUS run's output CSV -- no extra file to
+    manage, nothing that can drift out of sync with what was actually
+    scraped. This is what makes rerunning the exact same command (same
+    out_path) automatically fast the second time: the CSV this run is
+    about to overwrite already records, in its match_source column,
+    which PIDs came from the sequential scan, which came from a cluster
+    sweep, and which came from a targeted address search.
+
+    Must be called BEFORE out_path could be overwritten by this run's
+    result (see scrape_town's atomic-write handling) -- reads the file as
+    it was left by the LAST successful run.
+
+    Returns None if csv_path doesn't exist yet (first-ever run for this
+    town) or contains no recognized rows.
+    """
+    p = Path(csv_path)
+    if not p.exists():
+        return None
+
+    sequential_pids, cluster_pids, targeted_pids = [], [], []
+    with open(p, newline="") as f:
+        for row in csv.DictReader(f):
+            pid_str = (row.get("pid") or "").strip()
+            if not pid_str.isdigit():
+                continue
+            pid = int(pid_str)
+            source = row.get("match_source", "")
+            if source in ("sequential", "sequential_replay"):
+                sequential_pids.append(pid)
+            elif source in ("cluster_sweep", "cluster_replay"):
+                cluster_pids.append(pid)
+            elif source in ("targeted", "targeted_replay"):
+                targeted_pids.append(pid)
+
+    if not (sequential_pids or cluster_pids or targeted_pids):
+        return None  # empty or unrecognized CSV -- treat as no history
+
+    # sequenced_range.low is just this run's own pid_start (the CLI arg,
+    # same every run for a given town) -- nothing to reconstruct there.
+    # .high is the furthest PID the sequential scan (including any past
+    # growth probes, which are tagged match_source="sequential" too)
+    # actually confirmed a hit at. It may be a bit lower than the true
+    # last-PID-checked from the original scan (which also isn't stored
+    # here) -- fine, since the growth probe below just re-covers that
+    # small gap along with looking for further growth, at no extra cost.
+    sequenced_high = max(sequential_pids) if sequential_pids else pid_start - 1
+
+    # The CSV only has HITS, not every PID that was checked, so re-grouping
+    # them recovers each real cluster's actual span. Each group is then
+    # routed by density (see CLUSTER_REPLAY_DENSITY_THRESHOLD's docstring):
+    # dense groups become padded windows (cheap to fully re-sweep, catches
+    # in-fill growth for free); sparse groups become an exact PID list
+    # folded into targeted_pids instead (no point re-scanning mostly-empty
+    # space every single run).
+    cluster_windows = []
+    sparse_cluster_pids = []
+    for group in _group_pids_with_members(cluster_pids, CLUSTER_RECONSTRUCT_GAP_THRESHOLD):
+        lo, hi = group[0], group[-1]
+        density = len(group) / (hi - lo + 1)
+        if density >= CLUSTER_REPLAY_DENSITY_THRESHOLD:
+            cluster_windows.append((max(1, lo - CLUSTER_WINDOW_PAD), hi + CLUSTER_WINDOW_PAD))
+        else:
+            sparse_cluster_pids.extend(group)
+
+    history = {
+        "sequenced_range": {"low": pid_start, "high": sequenced_high},
+        "cluster_windows": cluster_windows,
+        "targeted_pids": sorted(set(targeted_pids) | set(sparse_cluster_pids)),
+    }
+    print(f"  reconstructed pid history from existing {csv_path}: "
+          f"sequenced_range={history['sequenced_range']}, "
+          f"{len(history['cluster_windows'])} cluster window(s) (dense), "
+          f"{len(sparse_cluster_pids)} sparse-cluster pid(s) folded into direct replay, "
+          f"{len(history['targeted_pids'])} targeted pid(s) total")
+    return history
+
 
 def scrape_town(town_slug: str, pid_start: int, pid_end: int, granit_geojson_path: str,
-                 out_path: str, max_consecutive_misses: int = 300):
+                 out_path: str, max_consecutive_misses: int = 300,
+                 use_history: bool = True):
     """
-    Pass 1: walk PIDs sequentially across [pid_start, pid_end]. VGSI PIDs
-    are dense but not perfectly contiguous (demolished/merged parcels
-    leave gaps), so gaps are tolerated, but the scan bails out after a
-    long consecutive run of misses -- a strong signal we've run past the
-    top of the town's MAIN PID range (not necessarily the top of the
-    town's real PID range -- see Pass 2 below).
+    HISTORY REPLAY (added): before doing anything else, this checks
+    whether out_path ALREADY EXISTS (i.e. this is a rerun for a town
+    that's been scraped before) and, if so, reconstructs a 'known PID
+    index' directly from that CSV's own match_source column (see
+    _load_pid_history_from_csv) -- no separate history file to manage or
+    forget to pass in. If found, Pass 1's blind range scan and Pass 2's
+    per-address VGSI searches are skipped for every PID the old CSV
+    already knew about; those get re-fetched directly by PID instead
+    (_fetch_pid_list: one request each, no address-search variants).
+    This is the fast path a MONTHLY re-run wants: assessed values change
+    every year, but which PID an address lives at does not, so there's
+    no need to re-discover it. Pass `use_history=False` to force a full
+    fresh scan and ignore any existing out_path (e.g. after a known bad
+    run, or the first time you suspect the town's PID layout shifted).
+
+    Still runs every time, history or not:
+      - a GROWTH PROBE just past the known sequenced range's high end
+        (or, on a genuine first run, wherever Pass 1's own early-stop
+        lands), to catch newly-added contiguous parcels (new
+        construction in the town's main range) that would otherwise sit
+        just past what the old CSV knew about.
+      - the normal Pass 2a/2b discovery flow (cluster sweep, then
+        per-address search), but only against whatever GRANIT addresses
+        are STILL unmatched after replay + the growth probe -- i.e.
+        genuinely new parcels not near anything already known. On a
+        re-run this list should be short; on a first run (no existing
+        CSV) it's everything Pass 1 didn't find, same as before.
+
+    The output CSV this run writes becomes the history source for the
+    NEXT run automatically -- nothing extra to save.
+
+    Pass 1 (only runs when there's no prior CSV to replay from): walk
+    PIDs sequentially across [pid_start, pid_end]. VGSI PIDs are dense
+    but not perfectly contiguous (demolished/merged parcels leave gaps),
+    so gaps are tolerated, but the scan bails out after a long
+    consecutive run of misses -- a strong signal we've run past the top
+    of the town's MAIN PID range (not necessarily the top of the town's
+    real PID range -- see Pass 2 below).
 
     SPEEDUP (2026-08-26): fetched BATCH_SIZE at a time via a bounded
     MAX_WORKERS thread pool over one shared requests.Session(), instead of
@@ -431,26 +968,154 @@ def scrape_town(town_slug: str, pid_start: int, pid_end: int, granit_geojson_pat
           cluster) goes through the original one-by-one address-search
           path, same as before, just on a hopefully much smaller list.
     """
-    session = requests.Session()
-    session.headers.update(HEADERS)
+    # ADDED 2026-08-30: fail fast if this town can't produce a single
+    # parseable page at all -- see probe_layout()'s docstring. Cheap (~5
+    # requests) insurance against repeating the Manchester scenario, where
+    # a systemic issue wasn't discovered until 28,000 addresses deep into
+    # Pass 2b.
+    if not probe_layout(town_slug):
+        raise RuntimeError(
+            f"probe_layout failed for {town_slug!r}: none of the probe PIDs "
+            f"produced a parseable page. Check the town_slug is correct, the "
+            f"site is reachable, and (if both look fine) inspect a raw page "
+            f"manually -- this may be a third layout variant not yet handled "
+            f"by parse_parcel()."
+        )
 
     all_rows: list[dict] = []
+    # ADDED alongside _range_fully_covered: every contiguous PID range
+    # actually scanned this run (sequenced replay/Pass 1, growth probe,
+    # each cluster window) gets recorded here, so Pass 2a can skip
+    # re-sweeping ground already covered by one of those instead of only
+    # relying on find_missing_addresses' text matching to notice.
+    scanned_ranges: list[tuple[int, int]] = []
 
-    with open(out_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        writer.writeheader()
+    # MUST happen before we open anything in "w" mode, which truncates --
+    # this is what lets the SAME out_path serve as both last run's output
+    # and this run's history source.
+    history = _load_pid_history_from_csv(out_path, pid_start) if use_history else None
 
-        # ---- Pass 1 ----
-        pass1_rows = _scan_pid_range(
-            session, town_slug, writer, pid_start, pid_end,
-            match_source="sequential", max_consecutive_misses=max_consecutive_misses,
-            progress_label=f"Pass 1, pid {pid_start}-{pid_end}",
-        )
-        all_rows.extend(pass1_rows)
+    # ATOMIC WRITE (added): every row this run finds is written to a temp
+    # file, NOT out_path directly. out_path itself is only touched once,
+    # at the very end, via a single atomic os.replace() -- and only if
+    # this function returns normally (no exception).
+    #
+    # Without this, out_path gets truncated to empty the moment it's
+    # opened, and gets whatever partial set of rows had been written by
+    # the time of a crash/kill/VGSIRequestStorm. That's a double problem:
+    # (1) today's run is left with an incomplete CSV instead of
+    # yesterday's complete one, and (2) the NEXT run reads that same
+    # out_path as its history source (_load_pid_history_from_csv), so it
+    # would "learn" that every PID missing from the partial file no
+    # longer exists -- exactly backwards from the point of this feature,
+    # which is to get FASTER on a retry, not to silently lose PIDs.
+    #
+    # A same-directory temp file + os.replace() is atomic on POSIX and on
+    # Windows (both replace the destination in one filesystem operation,
+    # not write-then-delete-then-rename) -- there's no window where
+    # out_path is half-written. If this run fails partway through,
+    # out_path is left exactly as the last SUCCESSFUL run left it, and
+    # <out_path>.partial sticks around with whatever got scraped before
+    # the failure, for post-mortem inspection -- it's overwritten (not
+    # accumulated) by the next attempt, and never read as history.
+    tmp_path = out_path + ".partial"
 
-        print("=" * 60)
-        print(f"Pass 1 done: {len(pass1_rows)} parcels written to {out_path}")
-        print("=" * 60)
+    with open(tmp_path, "w", newline="") as f:
+        inner_writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        inner_writer.writeheader()
+        writer = _DedupWriter(inner_writer)
+
+        if history is not None:
+            # ---- History replay: sequenced range, cluster windows, targeted PIDs ----
+            seq = history["sequenced_range"]
+            print("=" * 60)
+            print(f"HISTORY REPLAY: re-fetching {seq['high'] - seq['low'] + 1} sequenced pid(s), "
+                  f"{sum(hi - lo + 1 for lo, hi in history['cluster_windows'])} cluster pid(s), "
+                  f"{len(history['targeted_pids'])} targeted pid(s) directly by pid...")
+            print("=" * 60)
+
+            replay_rows, replay_missing = _fetch_pid_list(
+                town_slug, writer, range(seq["low"], seq["high"] + 1),
+                match_source="sequential_replay", progress_label="replay sequenced",
+            )
+            all_rows.extend(replay_rows)
+            sequenced_high = seq["high"]
+            scanned_ranges.append((seq["low"], seq["high"]))
+            print(f"  sequenced replay: {len(replay_rows)} hit, "
+                  f"{len(replay_missing)} no longer resolve")
+
+            for lo, hi in history["cluster_windows"]:
+                rows, missing = _fetch_pid_list(
+                    town_slug, writer, range(lo, hi + 1),
+                    match_source="cluster_replay", progress_label=f"replay cluster {lo}-{hi}",
+                )
+                all_rows.extend(rows)
+                scanned_ranges.append((lo, hi))
+                print(f"  cluster {lo}-{hi} replay: {len(rows)} hit, "
+                      f"{len(missing)} no longer resolve")
+
+            if history["targeted_pids"]:
+                rows, missing = _fetch_pid_list(
+                    town_slug, writer, history["targeted_pids"],
+                    match_source="targeted_replay", progress_label="replay targeted",
+                )
+                all_rows.extend(rows)
+                print(f"  targeted replay: {len(rows)} hit, {len(missing)} no longer resolve "
+                      f"(dropped -- no window to re-sweep for a single dead pid)")
+
+            # FIXED: the growth probe used to always scan exactly
+            # sequenced_high+1 .. sequenced_high+GROWTH_PROBE_WIDTH,
+            # completely ignoring the pid_end the caller passed in. That
+            # meant raising pid_end on the CLI (the obvious way to tell
+            # this town's range needs to extend further) had NO effect
+            # once history existed -- CONFIRMED via a real Manchester run
+            # where pid_end was raised from 20000 to 50000 and the probe
+            # still only checked up to sequenced_high+2000 regardless,
+            # filling that entire fixed window with real hits (1891/2000,
+            # no early-stop) -- a strong sign real data continued well
+            # past it, with no way to reach it short of --fresh (which
+            # would have thrown away ALL the good history just to widen
+            # one number). pid_end now sets a FLOOR on how far the probe
+            # is willing to look -- still bounded by
+            # GROWTH_PROBE_MAX_MISSES's early-stop, so a town that HASN'T
+            # grown doesn't pay for scanning all the way to pid_end, but
+            # one that has can now actually be told to look further.
+            growth_probe_hi = max(sequenced_high + GROWTH_PROBE_WIDTH, pid_end)
+            print("=" * 60)
+            print(f"GROWTH PROBE: checking pid {sequenced_high + 1}-"
+                  f"{growth_probe_hi} for newly-added parcels...")
+            print("=" * 60)
+            growth_rows, growth_last_pid = _scan_pid_range(
+                town_slug, writer, sequenced_high + 1, growth_probe_hi,
+                match_source="sequential", max_consecutive_misses=GROWTH_PROBE_MAX_MISSES,
+                progress_label=f"growth probe {sequenced_high + 1}-{growth_probe_hi}",
+            )
+            all_rows.extend(growth_rows)
+            scanned_ranges.append((sequenced_high + 1, growth_last_pid))
+            if growth_rows:
+                print(f"  growth probe: {len(growth_rows)} new parcel(s) found up to pid "
+                      f"{max(int(r['pid']) for r in growth_rows if str(r['pid']).isdigit())} "
+                      f"-- next run's replay will cover them directly")
+            else:
+                print("  growth probe: no new parcels found")
+            print("=" * 60)
+            print(f"HISTORY REPLAY done: {len(all_rows)} parcels re-confirmed/found without "
+                  f"per-address search.")
+            print("=" * 60)
+        else:
+            # ---- Pass 1 (no prior CSV to replay from -- first run for this town, or
+            # use_history=False forced a fresh scan) ----
+            pass1_rows, pass1_last_pid = _scan_pid_range(
+                town_slug, writer, pid_start, pid_end,
+                match_source="sequential", max_consecutive_misses=max_consecutive_misses,
+                progress_label=f"Pass 1, pid {pid_start}-{pid_end}",
+            )
+            all_rows.extend(pass1_rows)
+            scanned_ranges.append((pid_start, pass1_last_pid))
+
+            print("=" * 60)
+            print(f"Pass 1 done: {len(pass1_rows)} parcels staged to {tmp_path}")
+            print("=" * 60)
 
         # ---- Pass 2a: cluster discovery + sweep ----
         # Deferred import to avoid a circular import: vgsi_targeted_lookup.py
@@ -463,7 +1128,7 @@ def scrape_town(town_slug: str, pid_start: int, pid_end: int, granit_geojson_pat
         found_locations = [r["location"] for r in all_rows]
         missing_addresses = find_missing_addresses(found_locations, granit_geojson_path)
 
-        print(f"PASS 2a: {len(missing_addresses)} GRANIT addresses have no match from Pass 1 -- "
+        print(f"PASS 2a: {len(missing_addresses)} GRANIT addresses have no match so far -- "
               f"sampling up to {CLUSTER_DISCOVERY_SAMPLE_SIZE} to discover any out-of-range "
               f"PID clusters...")
         print("=" * 60)
@@ -474,7 +1139,7 @@ def scrape_town(town_slug: str, pid_start: int, pid_end: int, granit_geojson_pat
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = {
-                    executor.submit(lookup_and_fetch, town_slug, address, session): address
+                    executor.submit(lookup_and_fetch, town_slug, address): address
                     for address in discovery_sample
                 }
                 for future in concurrent.futures.as_completed(futures):
@@ -489,13 +1154,22 @@ def scrape_town(town_slug: str, pid_start: int, pid_end: int, granit_geojson_pat
                 for lo, hi in clusters:
                     window_lo = max(1, lo - CLUSTER_WINDOW_PAD)
                     window_hi = hi + CLUSTER_WINDOW_PAD
+                    if _range_fully_covered(window_lo, window_hi, scanned_ranges):
+                        print(f"  cluster window pid {window_lo}-{window_hi} already fully "
+                              f"scanned this run (sequenced/growth-probe/cluster replay covers "
+                              f"it) -- skipping redundant sweep. Any address here still showing "
+                              f"'missing' is almost certainly a GRANIT address-text mismatch "
+                              f"(e.g. a road-only entry with no house number), not an un-scanned "
+                              f"PID.")
+                        continue
                     print(f"  sweeping cluster window pid {window_lo}-{window_hi}...")
-                    swept = _scan_pid_range(
-                        session, town_slug, writer, window_lo, window_hi,
+                    swept, _swept_last_pid = _scan_pid_range(
+                        town_slug, writer, window_lo, window_hi,
                         match_source="cluster_sweep", max_consecutive_misses=None,
                         progress_label=f"cluster {window_lo}-{window_hi}",
                     )
                     all_rows.extend(swept)
+                    scanned_ranges.append((window_lo, window_hi))
                     print(f"  cluster pid {window_lo}-{window_hi}: {len(swept)} parcels captured")
             else:
                 print("  no candidate clusters discovered from the sample -- "
@@ -513,8 +1187,9 @@ def scrape_town(town_slug: str, pid_start: int, pid_end: int, granit_geojson_pat
         targeted_rows = []
         no_match, ambiguous, failed = [], [], []
 
-        # SPEEDUP: same session + MAX_WORKERS pool, instead of one address
-        # at a time with a blocking time.sleep(0.3). Order of the printed
+        # SPEEDUP: MAX_WORKERS pool, each worker using its own thread-local
+        # session (see _get_thread_session), instead of one address at a
+        # time with a blocking time.sleep(0.3). Order of the printed
         # [i/n] lines is no longer guaranteed to match still_missing's
         # original order (results print as they complete), but every
         # address is still looked up exactly once and every row still gets
@@ -522,7 +1197,7 @@ def scrape_town(town_slug: str, pid_start: int, pid_end: int, granit_geojson_pat
         if still_missing:
             with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = {
-                    executor.submit(lookup_and_fetch, town_slug, address, session): address
+                    executor.submit(lookup_and_fetch, town_slug, address): address
                     for address in still_missing
                 }
                 for i, future in enumerate(concurrent.futures.as_completed(futures), 1):
@@ -548,8 +1223,8 @@ def scrape_town(town_slug: str, pid_start: int, pid_end: int, granit_geojson_pat
                             "land_use_desc": parsed["land_use_desc"],
                             "match_source": "targeted",
                         }
-                        writer.writerow(row)
-                        targeted_rows.append(row)
+                        if writer.writerow(row):
+                            targeted_rows.append(row)
 
     all_rows.extend(targeted_rows)
 
@@ -568,26 +1243,53 @@ def scrape_town(town_slug: str, pid_start: int, pid_end: int, granit_geojson_pat
         for a in sample:
             print(f"    {a}")
     print("=" * 60)
+
+    # Only reached if every pass above completed without raising (e.g. no
+    # VGSIRequestStorm). This is the ONE moment out_path itself is
+    # touched -- os.replace() is atomic, so out_path either still holds
+    # the previous complete run's data (if we never get here) or
+    # this run's complete data (once this line finishes) -- never
+    # something in between.
+    os.replace(tmp_path, out_path)
+
     print(f"FINAL: {len(all_rows)} total parcels written to {out_path}.")
+    print(f"  ({out_path} is also this run's history source for the NEXT run -- "
+          f"nothing extra to save.)")
     print("=" * 60)
 
     return all_rows
 
 
 def main():
-    if len(sys.argv) != 6:
+    # ADDED: optional --fresh flag. Without it, if <output.csv> already
+    # exists from a prior run of this same town, this run automatically
+    # reads it first (see _load_pid_history_from_csv) and replays its
+    # known PIDs directly instead of repeating Pass 1's blind scan and
+    # Pass 2's per-address searches -- same command, same output path,
+    # just faster the second time onward. Pass --fresh to ignore any
+    # existing CSV and force a full scan from scratch (e.g. after a run
+    # you don't trust, or if you suspect the town's PID layout shifted).
+    args = [a for a in sys.argv[1:] if a != "--fresh"]
+    use_history = "--fresh" not in sys.argv
+
+    if len(args) != 5:
         print("Usage: python vgsi_assessment_scraper.py <town_slug> <pid_start> <pid_end> "
-              "<granit_parcels.geojson> <output.csv>")
-        print("Example: python vgsi_assessment_scraper.py lincolnnh 1 3000 lincoln_nh.geojson "
+              "<granit_parcels.geojson> <output.csv> [--fresh]")
+        print("Example (first run, or any monthly re-run -- same command either way):")
+        print("  python vgsi_assessment_scraper.py lincolnnh 1 3000 lincoln_nh.geojson "
               "lincoln_assessments.csv")
+        print("Example (force a full fresh scan, ignoring the existing output.csv):")
+        print("  python vgsi_assessment_scraper.py lincolnnh 1 3000 lincoln_nh.geojson "
+              "lincoln_assessments.csv --fresh")
         sys.exit(1)
 
-    town_slug = sys.argv[1]
-    pid_start, pid_end = int(sys.argv[2]), int(sys.argv[3])
-    granit_geojson_path = sys.argv[4]
-    out_path = sys.argv[5]
+    town_slug = args[0]
+    pid_start, pid_end = int(args[1]), int(args[2])
+    granit_geojson_path = args[3]
+    out_path = args[4]
 
-    scrape_town(town_slug, pid_start, pid_end, granit_geojson_path, out_path)
+    scrape_town(town_slug, pid_start, pid_end, granit_geojson_path, out_path,
+                use_history=use_history)
 
 
 if __name__ == "__main__":

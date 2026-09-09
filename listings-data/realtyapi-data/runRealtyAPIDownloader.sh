@@ -133,6 +133,7 @@ fi
 
 echo "Fetching page 1 for ${SCOPE_LABEL}..."
 PAGE1_FILE=$(fetch_page 1)
+PAGE_FILES=("$PAGE1_FILE")
 
 MESSAGE=$(json_field "$PAGE1_FILE" message)
 echo "  message: ${MESSAGE}"
@@ -180,6 +181,7 @@ while [ "$CONTINUE" == "True" ] && [ "$PAGE" -le "$PAGES_TO_FETCH" ]; do
         echo "WARNING: page ${PAGE} response wasn't a Success -- stopping early. Check ${OUT_FILE}." >&2
         break
     fi
+    PAGE_FILES+=("$OUT_FILE")
     CONTINUE=$(json_field "$OUT_FILE" nextPage)
     PAGE=$((PAGE + 1))
 done
@@ -191,4 +193,25 @@ echo "Used ${PAGES_FETCHED} API request(s) out of your shared RealtyAPI monthly 
 if [ "$PAGES_FETCHED" -lt "$PAGES_NEEDED" ]; then
     echo "NOTE: stopped before covering all ${TOTAL} listings -- ${PAGES_NEEDED} page(s) would" >&2
     echo "be needed in total. Re-run with a higher REALTYAPI_QUOTA_WARNING if you have quota left." >&2
+    echo "NOTE: skipping auto-load below -- marking removed listings against a partial page set" >&2
+    echo "would wrongly mark real, still-active listings from the unfetched pages as removed." >&2
+    exit 0
+fi
+
+# Auto-load + mark-removed, scoped to exactly what this run fetched. Requires
+# PROPERTYSCOUT_DSN so this stays optional -- unset it to just download files.
+LOADER_SCRIPT="$(dirname "$0")/load_listings_realtyapi.py"
+if [ "$1" == "--zip" ]; then
+    SCOPE_ARGS=(--scope-zip "$ZIP")
+else
+    SCOPE_ARGS=(--scope-city "$CITY" --scope-state "$STATE")
+fi
+
+echo ""
+if [ -n "$PROPERTYSCOUT_DSN" ]; then
+    echo "Loading ${PAGES_FETCHED} page file(s) into the DB and marking removed listings for ${SCOPE_LABEL}..."
+    python "$LOADER_SCRIPT" "${PAGE_FILES[@]}" "${SCOPE_ARGS[@]}" --mark-removed --dsn "$PROPERTYSCOUT_DSN"
+else
+    echo "PROPERTYSCOUT_DSN not set -- skipping auto-load. Load + mark-removed manually with:"
+    echo "  python \"$LOADER_SCRIPT\" ${PAGE_FILES[*]} ${SCOPE_ARGS[*]} --mark-removed --dsn \"<postgresql-dsn>\""
 fi

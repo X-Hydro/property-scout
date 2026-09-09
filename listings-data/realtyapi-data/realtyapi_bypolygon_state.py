@@ -249,7 +249,8 @@ def _dedupe_key(result: dict, id_field: str | None) -> str:
     return "hash:" + hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
 
 
-def dry_run_polygon(ring: list[list[float]], api_key: str, property_type: str) -> tuple[int, int]:
+def dry_run_polygon(ring: list[list[float]], api_key: str, property_type: str | None,
+                     foreclosure: bool = False) -> tuple[int, int]:
     """Fetches ONLY page 1 (one request, not the full pagination) and
     reads the API's own "total" field to compute (total_listings,
     pages_needed) for this part. This is the entire cost model a dry
@@ -262,16 +263,27 @@ def dry_run_polygon(ring: list[list[float]], api_key: str, property_type: str) -
         "resultCount": RESULT_COUNT,
         "sortOrder": SORT_ORDER,
         "searchType": SEARCH_TYPE,
-        "propertyType": property_type,
     }
+    if property_type:
+        params["propertyType"] = property_type
+    # CONFIRMED working on /search/bypolygon (2026-09-06): tested against a
+    # box drawn to genuinely contain a known is_foreclosure:true listing
+    # (9186 Steel St, Detroit MI 48228) -- an earlier test with a box that
+    # missed the point by ~0.03 degrees of latitude wrongly looked like a
+    # broken filter. Once the box actually contained the point, the same
+    # filter correctly returned it (plus 2 more real foreclosure-flagged
+    # listings). Lesson: always verify polygon coverage against a known
+    # point before trusting a zero-result test as evidence of a bug.
+    if foreclosure:
+        params["foreclosure"] = "true"
     data = _request_with_retries(headers, params)
     total = data.get("total", 0)
     pages = -(-total // RESULT_COUNT) if total else 0  # ceil division
     return total, pages
 
 
-def search_polygon(ring: list[list[float]], api_key: str, property_type: str,
-                    part_label: str) -> list[dict]:
+def search_polygon(ring: list[list[float]], api_key: str, property_type: str | None,
+                    part_label: str, foreclosure: bool = False) -> list[dict]:
     headers = {"x-realtyapi-key": api_key}
     params = {
         "polygon": ring_to_polygon_param(ring),
@@ -279,8 +291,11 @@ def search_polygon(ring: list[list[float]], api_key: str, property_type: str,
         "resultCount": RESULT_COUNT,
         "sortOrder": SORT_ORDER,
         "searchType": SEARCH_TYPE,
-        "propertyType": property_type,
     }
+    if property_type:
+        params["propertyType"] = property_type
+    if foreclosure:
+        params["foreclosure"] = "true"
     part_results = []
     last_known_total = None
     while True:
@@ -333,7 +348,15 @@ def main():
                          help=f"path to the .geojsonl file, one Feature per line "
                               f"(default: {GEOJSONL_PATH_DEFAULT})")
     parser.add_argument("--out", help="output JSON path (default: realtyapi_<state>.json)")
-    parser.add_argument("--property-type", default="single_family,land")
+    parser.add_argument("--property-type", default=None,
+                         help="comma list, e.g. single_family,land (see RealtyAPI's Realtor.com "
+                              "docs for accepted values -- not verified in this project). "
+                              "Default: omitted entirely, which should return all property types, "
+                              "since this is documented as an optional filter.")
+    parser.add_argument("--foreclosure", action="store_true",
+                         help="only return MLS-listed foreclosures (adds foreclosure=true). "
+                              "CONFIRMED working on /search/bypolygon as of 2026-09-06 -- see "
+                              "the comment in dry_run_polygon() for how that was verified")
     parser.add_argument("--max-parts", type=int, default=MAX_PARTS_DEFAULT,
                          help=f"max polygon parts to search per state, largest-area first "
                               f"(default {MAX_PARTS_DEFAULT}) -- see module docstring for the "
@@ -376,7 +399,7 @@ def main():
         for part_idx, ring in enumerate(rings):
             part_label = f"part {part_idx + 1}/{len(rings)}"
             try:
-                total, pages = dry_run_polygon(ring, api_key, args.property_type)
+                total, pages = dry_run_polygon(ring, api_key, args.property_type, args.foreclosure)
             except ScriptError as e:
                 print(f"FAILED on {part_label}: {e}", file=sys.stderr)
                 sys.exit(1)
@@ -396,7 +419,7 @@ def main():
     for part_idx, ring in enumerate(rings):
         part_label = f"part {part_idx + 1}/{len(rings)}"
         try:
-            part_results = search_polygon(ring, api_key, args.property_type, part_label)
+            part_results = search_polygon(ring, api_key, args.property_type, part_label, args.foreclosure)
         except ScriptError as e:
             print(f"FAILED on {part_label}: {e}", file=sys.stderr)
             sys.exit(1)
@@ -420,7 +443,8 @@ def main():
             seen_keys.add(key)
             all_results.append(result)
 
-    out_path = args.out or f"realtyapi_{args.state.lower()}.json"
+    suffix = "_foreclosures" if args.foreclosure else ""
+    out_path = args.out or f"realtyapi_{args.state.lower()}{suffix}.json"
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)
 

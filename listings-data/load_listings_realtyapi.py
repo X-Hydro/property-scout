@@ -50,6 +50,16 @@ Usage:
 
   # Fetch directly from the API for a zip and load (requires --api-key):
   python load_listings_realtyapi.py --fetch-zip 02180 --api-key "$REALTYAPI_KEY" --dsn "postgresql://..."
+
+  # Load ALL page file(s) from one scoped run, then mark any RealtyAPI
+  # listing in that same scope that did NOT appear as removed (status=
+  # 'Inactive', removed_date=today). Scope must match what was actually
+  # fetched -- never something wider -- and must include every page file
+  # from the run, or later pages get wrongly marked removed:
+  python load_listings_realtyapi.py realtyapi_data/nh_lincoln_page1.json \
+      --scope-city Lincoln --scope-state NH --mark-removed --dsn "postgresql://..."
+  python load_listings_realtyapi.py realtyapi_data/realtyapi_zip02180_page1.json \
+      --scope-zip 02180 --mark-removed --dsn "postgresql://..."
 """
 
 import sys
@@ -314,6 +324,50 @@ def fetch_search_byzip(zip_code: str, api_key: str, property_type: str = "single
     return [_listing_dict_from_raw(r) for r in all_records]
 
 
+def mark_removed_listings(conn, listing_ids: list[str], scope_city: str | None = None,
+                           scope_state: str | None = None, scope_zip: str | None = None) -> int:
+    """Marks any currently-non-Inactive RealtyAPI listing IN THE GIVEN SCOPE
+    that is NOT in listing_ids as removed (status='Inactive', removed_date=today).
+
+    Scope must match exactly what was just fetched -- either (city, state) or
+    zip -- never wider (e.g. never the whole state), since we only have fresh
+    data for the scope that was actually re-downloaded. Source is always
+    pinned to 'RealtyAPI-Realtor' so this never touches RentCast-sourced rows,
+    which this fetch says nothing about.
+
+    Marks rather than deletes: gap_results.listing_id has a plain FK to
+    listings.listing_id with no ON DELETE clause, so a hard DELETE here would
+    throw on any listing that's already been gap-computed. Marking preserves
+    history and keeps gap_results intact.
+
+    listing_ids should be the FULL set from every page of the current run --
+    passing only page 1 of a multi-page fetch would wrongly mark real,
+    still-active listings from later pages as removed.
+    """
+    if scope_zip:
+        where_scope = "zip_code = %s"
+        scope_params = [scope_zip]
+    elif scope_city and scope_state:
+        where_scope = "city = %s AND state = %s"
+        scope_params = [scope_city, scope_state]
+    else:
+        raise ValueError("mark_removed_listings requires either scope_zip, or both scope_city and scope_state")
+
+    query = f"""
+        UPDATE listings
+        SET status = 'Inactive', removed_date = CURRENT_DATE
+        WHERE source = 'RealtyAPI-Realtor'
+          AND {where_scope}
+          AND status != 'Inactive'
+          AND listing_id != ALL(%s)
+    """
+    with conn.cursor() as cur:
+        cur.execute(query, scope_params + [listing_ids])
+        n = cur.rowcount
+    conn.commit()
+    return n
+
+
 def main():
     if len(sys.argv) == 1:
         print("Usage:")
@@ -328,7 +382,23 @@ def main():
     parser.add_argument("--inspect", action="store_true", help="Print the shape of the first file's first record and exit -- no DB write")
     parser.add_argument("--fetch-zip", help="Live-fetch listings for this ZIP via /search/byzip instead of reading files")
     parser.add_argument("--api-key", help="RealtyAPI key (required with --fetch-zip)")
+    parser.add_argument("--mark-removed", action="store_true",
+                         help="After upserting, mark any RealtyAPI listing in the given scope that "
+                              "did NOT appear in this run as Inactive/removed_date=today. Requires "
+                              "--scope-zip, or both --scope-city and --scope-state -- must match the "
+                              "scope that was actually fetched, never something wider.")
+    parser.add_argument("--scope-city", help="City scope for --mark-removed (pair with --scope-state)")
+    parser.add_argument("--scope-state", help="State scope for --mark-removed (pair with --scope-city)")
+    parser.add_argument("--scope-zip", help="Zip scope for --mark-removed")
     args = parser.parse_args()
+
+    if args.mark_removed:
+        has_zip_scope = bool(args.scope_zip)
+        has_city_scope = bool(args.scope_city and args.scope_state)
+        if has_zip_scope == has_city_scope:  # neither given, or both given -- ambiguous either way
+            print("ERROR: --mark-removed requires exactly one scope: --scope-zip, "
+                  "or both --scope-city and --scope-state.")
+            sys.exit(1)
 
     if args.inspect:
         paths = _expand_paths(args.files)
@@ -349,6 +419,11 @@ def main():
             _check_schema_exists(conn)
             n = upsert_listings(conn, listings)
             print(f"Done. {n} listings upserted for zip {args.fetch_zip}.")
+            if args.mark_removed:
+                ids = [l["listing_id"] for l in listings if l.get("listing_id")]
+                n_removed = mark_removed_listings(conn, ids, scope_zip=args.fetch_zip)
+                print(f"Marked {n_removed} listing(s) in zip {args.fetch_zip} as removed "
+                      f"(not present in this fetch).")
         finally:
             conn.close()
         return
@@ -369,12 +444,23 @@ def main():
     try:
         _check_schema_exists(conn)
         total = 0
+        all_ids = []  # full set across every file THIS run -- required for correct --mark-removed
         for path in paths:
             listings = parse_listings_file(path)
             n = upsert_listings(conn, listings)
             print(f"  {path}: upserted {n} listings")
             total += n
+            all_ids.extend(l["listing_id"] for l in listings if l.get("listing_id"))
         print(f"\nDone. {total} total listings upserted across {len(paths)} file(s).")
+
+        if args.mark_removed:
+            n_removed = mark_removed_listings(
+                conn, all_ids,
+                scope_city=args.scope_city, scope_state=args.scope_state, scope_zip=args.scope_zip
+            )
+            scope_label = args.scope_zip or f"{args.scope_city}, {args.scope_state}"
+            print(f"Marked {n_removed} listing(s) in {scope_label} as removed "
+                  f"(not present across the {len(paths)} file(s) loaded this run).")
     finally:
         conn.close()
 
