@@ -72,6 +72,8 @@ SPIDER_KWARGS = {
         "town_slug": "town_slug",
         "pid_end": "pid_end",
         "out_dir": "out",
+        "value_source": "value_source",
+        "offmarket_zips": "offmarket_zip",
     },
     # ma, md, nj intentionally absent -- none of their spiders take
     # constructor args (MASpider since its live-query rewrite, see
@@ -119,6 +121,15 @@ def main():
     parser.add_argument("--pid-end", type=int, default=20000, help="NH only")
     parser.add_argument("--town-slug", help="NH only, single-town VGSI slug override")
     parser.add_argument("--granit-geojson", help="NH only, single-town pre-downloaded geojson")
+    parser.add_argument("--value-source", choices=["vgsi", "offmarket"], default="vgsi",
+                         help="NH only: 'vgsi' (default, per-town VGSI scraping) or 'offmarket' "
+                              "(RealtyAPI/Zillow off-market values via point-in-polygon -- see "
+                              "nh_spider.py's module docstring). Ignored for every other state.")
+    parser.add_argument("--offmarket-zip", nargs="+",
+                         help="NH offmarket path only: skip statewide listings-fetch + zip-"
+                              "selection and sweep only these zip(s) directly -- for a deliberate "
+                              "scoped run (e.g. refreshing one town after new listings came in). "
+                              "You're responsible for knowing which zip(s) cover the town(s) run.")
     parser.add_argument("-e", "--stop-on-error", action="store_true",
                          help="stop immediately if any town fails, instead of the default "
                               "behavior of logging the failure to <out>/<state>_failed.txt "
