@@ -32,6 +32,12 @@ baked into the mapping below:
     Stored whole in the `agent` column; `office` column is left NULL rather
     than force a mismatched shape.
 
+CONFIRMED (2026-09): realtyapi_bypolygon_state.py's flattened statewide
+output (a bare JSON array, not the {message,...,searchResults} wrapper) uses
+the identical per-record schema as /search/byzip -- checked field-by-field
+via --inspect against a real MA statewide run. No mapping changes needed for
+that source.
+
 INPUT SHAPE: a file or directory of files, each holding one saved RealtyAPI
 /search/* response object: {"message", "source", "total", "nextPage",
 "resultCount", "searchResults": [...]}. A bare JSON array of listing objects
@@ -60,6 +66,16 @@ Usage:
       --scope-city Lincoln --scope-state NH --mark-removed --dsn "postgresql://..."
   python load_listings_realtyapi.py realtyapi_data/realtyapi_zip02180_page1.json \
       --scope-zip 02180 --mark-removed --dsn "postgresql://..."
+
+  # State-wide mark-removed (NEW) -- only for a fetch that covers the WHOLE
+  # state in one run (e.g. realtyapi_bypolygon_state.py's output), and only
+  # after you've verified that fetch was genuinely complete (no dropped
+  # polygon parts, no silent 10k-per-part pagination cap -- see that
+  # script's docstring). --confirm-complete-fetch is a manual acknowledgment,
+  # not an automated check -- it does not verify anything itself:
+  python load_listings_realtyapi.py realtyapi-data/realtyapi_ma.json \
+      --scope-state MA --scope-state-only --confirm-complete-fetch \
+      --mark-removed --dsn "postgresql://..."
 """
 
 import sys
@@ -325,15 +341,27 @@ def fetch_search_byzip(zip_code: str, api_key: str, property_type: str = "single
 
 
 def mark_removed_listings(conn, listing_ids: list[str], scope_city: str | None = None,
-                           scope_state: str | None = None, scope_zip: str | None = None) -> int:
+                           scope_state: str | None = None, scope_zip: str | None = None,
+                           scope_state_only: bool = False) -> int:
     """Marks any currently-non-Inactive RealtyAPI listing IN THE GIVEN SCOPE
     that is NOT in listing_ids as removed (status='Inactive', removed_date=today).
 
-    Scope must match exactly what was just fetched -- either (city, state) or
-    zip -- never wider (e.g. never the whole state), since we only have fresh
-    data for the scope that was actually re-downloaded. Source is always
-    pinned to 'RealtyAPI-Realtor' so this never touches RentCast-sourced rows,
-    which this fetch says nothing about.
+    Scope must match exactly what was just fetched -- (city, state), zip, or
+    (NEW) the whole state via scope_state_only -- never wider than what was
+    actually re-downloaded. Source is always pinned to 'RealtyAPI-Realtor' so
+    this never touches RentCast-sourced rows, which this fetch says nothing
+    about.
+
+    scope_state_only=True is for a run whose fetch genuinely covered the
+    ENTIRE state in one go (e.g. realtyapi_bypolygon_state.py's output),
+    unlike the original city/zip scopes, which assumed a run only ever
+    covered a small slice of a state. This has a much larger blast radius --
+    every non-Inactive RealtyAPI-Realtor row in that state not present in
+    listing_ids gets marked removed. The CLI layer (see main()) requires
+    --confirm-complete-fetch alongside --scope-state-only for exactly this
+    reason; this function itself does not re-verify fetch completeness --
+    that verification (no dropped polygon parts, no silent pagination cap)
+    has to happen before this is called.
 
     Marks rather than deletes: gap_results.listing_id has a plain FK to
     listings.listing_id with no ON DELETE clause, so a hard DELETE here would
@@ -347,11 +375,15 @@ def mark_removed_listings(conn, listing_ids: list[str], scope_city: str | None =
     if scope_zip:
         where_scope = "zip_code = %s"
         scope_params = [scope_zip]
+    elif scope_state_only:
+        where_scope = "state = %s"
+        scope_params = [scope_state]
     elif scope_city and scope_state:
         where_scope = "city = %s AND state = %s"
         scope_params = [scope_city, scope_state]
     else:
-        raise ValueError("mark_removed_listings requires either scope_zip, or both scope_city and scope_state")
+        raise ValueError("mark_removed_listings requires scope_zip, scope_state_only "
+                          "(+ scope_state), or both scope_city and scope_state")
 
     query = f"""
         UPDATE listings
@@ -385,19 +417,48 @@ def main():
     parser.add_argument("--mark-removed", action="store_true",
                          help="After upserting, mark any RealtyAPI listing in the given scope that "
                               "did NOT appear in this run as Inactive/removed_date=today. Requires "
-                              "--scope-zip, or both --scope-city and --scope-state -- must match the "
-                              "scope that was actually fetched, never something wider.")
+                              "--scope-zip, both --scope-city and --scope-state, or "
+                              "--scope-state-only + --scope-state (+ --confirm-complete-fetch) -- "
+                              "must match the scope that was actually fetched, never something wider.")
     parser.add_argument("--scope-city", help="City scope for --mark-removed (pair with --scope-state)")
-    parser.add_argument("--scope-state", help="State scope for --mark-removed (pair with --scope-city)")
+    parser.add_argument("--scope-state", help="State scope for --mark-removed (pair with --scope-city, "
+                                               "or alone with --scope-state-only)")
     parser.add_argument("--scope-zip", help="Zip scope for --mark-removed")
+    parser.add_argument("--scope-state-only", action="store_true",
+                         help="Use --scope-state alone (no city) for --mark-removed, marking removed "
+                              "listings across the WHOLE state. Only safe for a fetch that genuinely "
+                              "covered the entire state in one run (e.g. realtyapi_bypolygon_state.py's "
+                              "output) -- requires --confirm-complete-fetch, since this has a much "
+                              "larger blast radius than the city/zip-scoped modes.")
+    parser.add_argument("--confirm-complete-fetch", action="store_true",
+                         help="Required alongside --scope-state-only. Manually acknowledges you've "
+                              "verified this fetch covers the whole state with nothing silently "
+                              "dropped or capped (no missing polygon parts, no silent 10k-per-part "
+                              "pagination cap -- see realtyapi_bypolygon_state.py's docstring). This "
+                              "flag does not verify anything itself.")
     args = parser.parse_args()
 
     if args.mark_removed:
         has_zip_scope = bool(args.scope_zip)
         has_city_scope = bool(args.scope_city and args.scope_state)
-        if has_zip_scope == has_city_scope:  # neither given, or both given -- ambiguous either way
+        has_state_only_scope = bool(args.scope_state_only and args.scope_state and not args.scope_city)
+
+        if args.scope_state_only and not has_state_only_scope:
+            print("ERROR: --scope-state-only requires --scope-state and must NOT be combined with "
+                  "--scope-city (use --scope-city + --scope-state without --scope-state-only instead).")
+            sys.exit(1)
+
+        if has_state_only_scope and not args.confirm_complete_fetch:
+            print("ERROR: --scope-state-only requires --confirm-complete-fetch -- this marks removed "
+                  "listings across the ENTIRE state, only safe if you've verified this fetch had no "
+                  "dropped polygon parts and didn't hit a silent pagination cap.")
+            sys.exit(1)
+
+        scope_count = sum([has_zip_scope, has_city_scope, has_state_only_scope])
+        if scope_count != 1:
             print("ERROR: --mark-removed requires exactly one scope: --scope-zip, "
-                  "or both --scope-city and --scope-state.")
+                  "--scope-city + --scope-state, or --scope-state-only + --scope-state "
+                  "(+ --confirm-complete-fetch).")
             sys.exit(1)
 
     if args.inspect:
@@ -456,9 +517,15 @@ def main():
         if args.mark_removed:
             n_removed = mark_removed_listings(
                 conn, all_ids,
-                scope_city=args.scope_city, scope_state=args.scope_state, scope_zip=args.scope_zip
+                scope_city=args.scope_city, scope_state=args.scope_state, scope_zip=args.scope_zip,
+                scope_state_only=args.scope_state_only,
             )
-            scope_label = args.scope_zip or f"{args.scope_city}, {args.scope_state}"
+            if args.scope_zip:
+                scope_label = args.scope_zip
+            elif args.scope_state_only:
+                scope_label = f"{args.scope_state} (state-wide)"
+            else:
+                scope_label = f"{args.scope_city}, {args.scope_state}"
             print(f"Marked {n_removed} listing(s) in {scope_label} as removed "
                   f"(not present across the {len(paths)} file(s) loaded this run).")
     finally:
