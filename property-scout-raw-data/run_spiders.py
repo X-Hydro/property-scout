@@ -73,7 +73,9 @@ SPIDER_KWARGS = {
         "pid_end": "pid_end",
         "out_dir": "out",
         "value_source": "value_source",
-        "offmarket_zips": "offmarket_zip",
+        "seed_radius": "seed_radius",
+        "min_radius": "min_radius",
+        "max_calls": "max_calls",
     },
     # ma, md, nj intentionally absent -- none of their spiders take
     # constructor args (MASpider since its live-query rewrite, see
@@ -123,13 +125,18 @@ def main():
     parser.add_argument("--granit-geojson", help="NH only, single-town pre-downloaded geojson")
     parser.add_argument("--value-source", choices=["vgsi", "offmarket"], default="vgsi",
                          help="NH only: 'vgsi' (default, per-town VGSI scraping) or 'offmarket' "
-                              "(RealtyAPI/Zillow off-market values via point-in-polygon -- see "
-                              "nh_spider.py's module docstring). Ignored for every other state.")
-    parser.add_argument("--offmarket-zip", nargs="+",
-                         help="NH offmarket path only: skip statewide listings-fetch + zip-"
-                              "selection and sweep only these zip(s) directly -- for a deliberate "
-                              "scoped run (e.g. refreshing one town after new listings came in). "
-                              "You're responsible for knowing which zip(s) cover the town(s) run.")
+                              "(RealtyAPI/Zillow off-market values via per-town parcel-extent "
+                              "sweep -- see nh_spider.py's module docstring). Ignored for every "
+                              "other state.")
+    parser.add_argument("--seed-radius", type=float, default=2.0,
+                         help="NH offmarket path only: starting sweep radius in miles (default 2)")
+    parser.add_argument("--min-radius", type=float, default=0.25,
+                         help="NH offmarket path only: recursive splitting floor in miles (default 0.25)")
+    parser.add_argument("--max-calls", type=int, default=200,
+                         help="NH offmarket path only: PER-TOWN API call budget (default 200) -- "
+                              "not a statewide budget; a multi-town run can still exceed your "
+                              "RealtyAPI plan's monthly cap if you run too many towns in one month, "
+                              "see nh_spider.py's module docstring for the confirmed budget math")
     parser.add_argument("-e", "--stop-on-error", action="store_true",
                          help="stop immediately if any town fails, instead of the default "
                               "behavior of logging the failure to <out>/<state>_failed.txt "
