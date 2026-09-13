@@ -175,6 +175,32 @@ def parcel_centroids(parcels_geojson_path):
     return centroids
 
 
+def filter_seeds_near_points(seeds: list, points: list, threshold_miles: float) -> list:
+    """
+    Keeps only seed cells that have at least one of `points` within
+    threshold_miles of the seed's CENTER. Built for: don't sweep an area
+    with no listings anywhere near it, since the resulting property
+    values would never be used as a gap-analysis comp for anything.
+
+    threshold_miles should already be (seed's own search radius + the
+    real downstream comp-matching distance), not just the comp distance
+    alone -- a listing sitting near the far edge of a seed's circle can
+    still need parcels from deep inside that circle as comps, so the
+    seed must be kept even if the listing itself is seed_radius away
+    from the seed's center, not just comp_radius away.
+    """
+    kept = []
+    for seed_lat, seed_lon in seeds:
+        for pt_lat, pt_lon in points:
+            d = MILES_PER_DEGREE_LAT * math.hypot(
+                seed_lat - pt_lat, (seed_lon - pt_lon) * math.cos(math.radians(seed_lat))
+            )
+            if d <= threshold_miles:
+                kept.append((seed_lat, seed_lon))
+                break
+    return kept
+
+
 def seed_grid(centroids, seed_radius):
     if not centroids:
         return []

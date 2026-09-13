@@ -19,11 +19,11 @@ file (or the whole file) to force it to be re-swept.
 
 BUDGET SAFETY: stops starting a NEW town once (calls used so far this
 session) + (--max-calls, the per-town ceiling) would exceed
---monthly-budget. This guarantees the session can never exceed budget
+--max-session-calls. This guarantees the session can never exceed budget
 even in the worst case where the next town hits its full per-town cap --
 which means a run may stop meaningfully short of the full budget if the
 next town's worst case wouldn't fit. That's intentional conservatism
-given how tight the real cap is; raise --max-calls or --monthly-budget
+given how tight the real cap is; raise --max-calls or --max-session-calls
 if this leaves too much budget unused in practice.
 
 Town list source: a New England town boundaries GeoJSON (e.g.
@@ -32,12 +32,12 @@ features.
 
 Usage:
     python sweep_nh_statewide.py newengland_town_boundaries.json \
-        --out ./nh_data_statewide --monthly-budget 1800
+        --out ./nh_data_statewide --max-session-calls 1800
 
     # Following month, same command -- picks up automatically where the
     # checkpoint left off:
     python sweep_nh_statewide.py newengland_town_boundaries.json \
-        --out ./nh_data_statewide --monthly-budget 1800
+        --out ./nh_data_statewide --max-session-calls 1800
 """
 
 import sys
@@ -54,10 +54,16 @@ from spiders.nh.nh_spider import NHSpider
 def load_nh_town_list(boundaries_path: str) -> list[str]:
     with open(boundaries_path) as f:
         data = json.load(f)
-    return sorted(
+    # DEDUPED (set, not just sorted) -- CONFIRMED 2026-09: some NH towns
+    # appear as multiple separate features (islands, disjoint parts),
+    # same quirk load_town_boundary() elsewhere already unions together.
+    # Without dedup here, a repeated name gets swept multiple times per
+    # session and inflates session_completed's length past the real town
+    # count (seen directly: a "394/259" progress counter).
+    return sorted({
         f["properties"]["name"] for f in data["features"]
         if f["properties"].get("a1_admin_code") == "NH" and f["properties"].get("name")
-    )
+    })
 
 
 def load_checkpoint(checkpoint_path: str) -> set[str]:
@@ -77,12 +83,11 @@ def main():
     parser.add_argument("boundaries_geojson", help="New England town boundaries GeoJSON")
     parser.add_argument("--out", default="nh_data_statewide")
     parser.add_argument("--checkpoint", default="nh_statewide_progress.json")
-    parser.add_argument("--monthly-budget", type=int, default=1800,
+    parser.add_argument("--max-session-calls", type=int, default=1800,
                          help="stop starting new towns once this session's calls + the next "
                               "town's worst case (--max-calls) would exceed this (default 1800, "
                               "leaving headroom under a 2000/month cap for other RealtyAPI usage "
                               "elsewhere in the project)")
-    parser.add_argument("--seed-radius", type=float, default=2.0)
     parser.add_argument("--min-radius", type=float, default=0.25)
     parser.add_argument("--max-calls", type=int, default=200,
                          help="PER-TOWN ceiling, also used as the worst-case reserve for the "
@@ -103,7 +108,6 @@ def main():
     spider = NHSpider(
         out_dir=args.out,
         value_source="offmarket",
-        seed_radius=args.seed_radius,
         min_radius=args.min_radius,
         max_calls=args.max_calls,
     )
@@ -112,10 +116,10 @@ def main():
     session_failed = []
 
     for town in remaining:
-        if spider.total_api_calls + args.max_calls > args.monthly_budget:
+        if spider.total_api_calls + args.max_calls > args.max_session_calls:
             print(f"\nSTOPPING: {spider.total_api_calls} call(s) used this session, next town's "
-                  f"worst case ({args.max_calls}) would exceed --monthly-budget "
-                  f"{args.monthly_budget}. {len(remaining) - len(session_completed)} town(s) "
+                  f"worst case ({args.max_calls}) would exceed --max-session-calls "
+                  f"{args.max_session_calls}. {len(remaining) - len(session_completed)} town(s) "
                   f"remain for next month's run.")
             break
 

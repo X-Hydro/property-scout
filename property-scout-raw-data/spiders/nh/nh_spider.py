@@ -44,12 +44,13 @@ Usage:
 
     # New offmarket path, per-town parcel-extent sweep:
     python -m spiders.nh_spider Lincoln --value-source offmarket --out data/
-    python -m spiders.nh_spider Lincoln --value-source offmarket --seed-radius 4 --max-calls 150 --out data/
+    python -m spiders.nh_spider Lincoln --value-source offmarket --max-calls 150 --out data/
 """
 
 import sys
 import os
 import json
+import math
 import argparse
 from pathlib import Path
 from datetime import date
@@ -94,6 +95,24 @@ else:
 
 OFFMARKET_RAW_DIR = "offmarket-raw"  # per-town subdirectory for this town's raw sweep file only
 
+# The real, actual downstream requirement (Thale, 2026-09): gap analysis
+# compares a listing's price against nearby comps' values within ~200m.
+# A town with no listings at all gets nothing swept, since there'd be no
+# possible gap-analysis comparison anywhere in it.
+# SIMPLIFIED (2026-09): grid seeded directly from listing coordinates via
+# seed_grid() (grid-snap to occupied cells -- no cluster_points()/
+# cluster_to_circle() variable-radius clustering anymore; that approach
+# was more call-efficient in testing but added real maintenance
+# complexity -- union-find clustering, chaining risk, threshold tuning --
+# not worth it going forward. This reuses RealtyAPI support's own
+# validated recipe parameters (radius=2, split down to 0.25mi) directly,
+# just seeded from listing locations instead of blindly tiling a whole
+# zip/town -- still skips empty areas, since seed_grid only returns cells
+# that actually contain a listing. No separate comp-radius buffer needed
+# here either -- a 2-mile cell already covers far more than the 200m
+# gap-analysis comp radius on its own.
+SEED_RADIUS_MILES = 2.0
+
 
 def _guess_vgsi_town_slug(town: str) -> str:
     return town.lower().replace(" ", "") + "nh"
@@ -137,7 +156,8 @@ class NHSpider(StateSpider):
     def __init__(self, granit_geojson: str = None, town_slug: str = None,
                  pid_end: int = 20000, out_dir: str = "data",
                  value_source: str = "vgsi",
-                 seed_radius: float = 2.0, min_radius: float = 0.25, max_calls: int = 200):
+                 min_radius: float = 0.25, max_calls: int = 200,
+                 listings_file: str = None):
         if _IMPORT_ERROR is not None:
             raise SpiderError(
                 f"Could not import the NH pipeline scripts from {PIPELINE_DIR} -- "
@@ -152,7 +172,6 @@ class NHSpider(StateSpider):
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.value_source = value_source
-        self.seed_radius = seed_radius
         self.min_radius = min_radius
         self.max_calls = max_calls
         self.total_api_calls = 0  # accumulates across every fetch_town() call this spider
@@ -162,6 +181,21 @@ class NHSpider(StateSpider):
 
         if value_source == "offmarket" and not os.environ.get("REALTYAPI_KEY"):
             raise SpiderError("value_source='offmarket' requires REALTYAPI_KEY set in the environment")
+
+        # Listings-scoped seeding -- a real, accepted dependency on the
+        # statewide listings file existing already, since seed_grid() is
+        # fed listing coordinates, not parcel data. A town CAN have zero
+        # listings at all, in which case there's nothing to seed and
+        # nothing gets swept for that town -- intentional, not a bug: no
+        # listing means no possible gap-analysis comparison there.
+        self.listings_file = listings_file or str(PROJECT_ROOT / "realtyapi-data" / "realtyapi_nh.json")
+        if value_source == "offmarket" and not os.path.exists(self.listings_file):
+            raise SpiderError(
+                f"value_source='offmarket' requires a statewide listings file at "
+                f"{self.listings_file} (or pass listings_file= explicitly) -- run "
+                f"`python realtyapi_bypolygon_state.py NH --property-type single_family,land` "
+                f"first to generate it."
+            )
 
     def _get_granit_geojson(self, town: str) -> str:
         if self.granit_geojson_override:
@@ -190,6 +224,21 @@ class NHSpider(StateSpider):
         with open(debug_path, "w") as f:
             json.dump(geojson, f)
         print(f"  [offmarket] debug point layer ({len(geojson['features'])} point(s)) -> {debug_path}")
+
+    def _load_town_listing_points(self, town: str) -> list:
+        """Coordinates of every active listing in this town, from the
+        statewide listings file -- fed directly into seed_grid() to
+        decide which grid cells are worth sweeping, not loaded into the
+        DB from here (that's a separate step, load_listings_realtyapi.py)."""
+        with open(self.listings_file) as f:
+            payload = json.load(f)
+        records = payload if isinstance(payload, list) else payload.get("searchResults", [])
+        return [
+            (r["address"]["latitude"], r["address"]["longitude"])
+            for r in records
+            if (r.get("address", {}).get("city") or "").lower() == town.lower()
+            and r.get("address", {}).get("latitude") is not None
+        ]
 
     def _sweep_offmarket_for_town(self, town: str, granit_geojson_path: str) -> str:
         """
@@ -222,25 +271,29 @@ class NHSpider(StateSpider):
 
         api_key = os.environ.get("REALTYAPI_KEY")
 
-        centroids = offmarket_value_sweep.parcel_centroids(granit_geojson_path)
-        if not centroids:
-            raise SpiderError(f"No usable parcel centroids in {granit_geojson_path} for {town}")
+        listing_points = self._load_town_listing_points(town)
+        seeds = offmarket_value_sweep.seed_grid(listing_points, SEED_RADIUS_MILES)
+        print(f"  [offmarket] {len(listing_points)} listing(s) in {town} -> {len(seeds)} "
+              f"occupied grid cell(s) at {SEED_RADIUS_MILES}mi")
 
-        seeds = offmarket_value_sweep.seed_grid(centroids, self.seed_radius)
-        print(f"  [offmarket] {len(centroids)} parcel centroid(s) -> {len(seeds)} seed cell(s) "
-              f"at {self.seed_radius}mi for {town}")
+        if not seeds:
+            print(f"  [offmarket] {town}: no listings, nothing to sweep -- skipping entirely")
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            with open(raw_path, "w") as f:
+                json.dump({"offMarketResults": []}, f)
+            return str(raw_dir)
 
         seen_zpids, out_records, incomplete_areas, call_counter = set(), [], [], [0]
         visited_cells = set()
 
         for i, (lat, lon) in enumerate(seeds, 1):
-            print(f"  [offmarket] seed {i}/{len(seeds)} for {town}...")
+            print(f"  [offmarket] cell {i}/{len(seeds)} for {town}...")
             if call_counter[0] >= self.max_calls:
                 print(f"    SKIPPED -- --max-calls {self.max_calls} budget exhausted for this town")
-                incomplete_areas.append((lat, lon, self.seed_radius, "ABORTED-BUDGET"))
+                incomplete_areas.append((lat, lon, SEED_RADIUS_MILES, "ABORTED-BUDGET"))
                 continue
             offmarket_value_sweep.sweep_complete(
-                lat, lon, self.seed_radius, self.min_radius, api_key,
+                lat, lon, SEED_RADIUS_MILES, self.min_radius, api_key,
                 seen_zpids, out_records, incomplete_areas, call_counter,
                 self.max_calls, visited_cells
             )
@@ -298,11 +351,32 @@ class NHSpider(StateSpider):
 
         if self.value_source == "offmarket":
             offmarket_dir = self._sweep_offmarket_for_town(town, granit_geojson_path)
-            points = join_parcels_offmarket.load_offmarket_points(offmarket_dir)
-            tree = join_parcels_offmarket.build_index(points)
             joined_geojson = str(self.out_dir / f"{town.lower()}_nh_offmarket_joined.geojson")
-            print(f"  joining GRANIT parcels + offmarket points for {town}...")
-            join_parcels_offmarket.join_town_file(granit_geojson_path, tree, points, joined_geojson)
+
+            with open(Path(offmarket_dir) / f"{town.lower()}_nh_offmarket_raw.json") as f:
+                raw_count = len(json.load(f).get("offMarketResults", []))
+
+            if raw_count == 0:
+                # No listings in this town -> nothing was swept, intentionally (see
+                # _sweep_offmarket_for_town). Pass GRANIT parcels through with null value
+                # fields instead of calling load_offmarket_points, which raises on zero
+                # points -- this is expected here, not a real failure.
+                print(f"  [offmarket] {town}: 0 swept records, passing parcels through with "
+                      f"null values (no listings to compare against in this town)")
+                with open(granit_geojson_path) as f:
+                    parcels = json.load(f)
+                for feature in parcels["features"]:
+                    for field in ("total_market_value", "offmarket_zpid", "offmarket_address",
+                                  "tax_assessed_value", "tax_assessment_year", "match_method",
+                                  "match_point_count"):
+                        feature["properties"].setdefault(field, None if field != "match_point_count" else 0)
+                with open(joined_geojson, "w") as f:
+                    json.dump(parcels, f)
+            else:
+                points = join_parcels_offmarket.load_offmarket_points(offmarket_dir)
+                tree = join_parcels_offmarket.build_index(points)
+                print(f"  joining GRANIT parcels + offmarket points for {town}...")
+                join_parcels_offmarket.join_town_file(granit_geojson_path, tree, points, joined_geojson)
         else:
             town_slug = self.town_slug_override or _guess_vgsi_town_slug(town)
             assessments_csv = str(self.out_dir / f"{town.lower()}_nh_assessments.csv")
@@ -326,7 +400,6 @@ def main():
     parser.add_argument("--town-slug", help="VGSI town slug override, e.g. lincolnnh (vgsi path only)")
     parser.add_argument("--pid-end", type=int, default=20000)
     parser.add_argument("--value-source", choices=["vgsi", "offmarket"], default="vgsi")
-    parser.add_argument("--seed-radius", type=float, default=2.0, help="offmarket path only")
     parser.add_argument("--min-radius", type=float, default=0.25, help="offmarket path only")
     parser.add_argument("--max-calls", type=int, default=200,
                          help="offmarket path only -- PER-TOWN budget, not statewide")
@@ -343,7 +416,6 @@ def main():
         pid_end=args.pid_end,
         out_dir=args.out,
         value_source=args.value_source,
-        seed_radius=args.seed_radius,
         min_radius=args.min_radius,
         max_calls=args.max_calls,
     )

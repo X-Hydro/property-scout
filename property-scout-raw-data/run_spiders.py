@@ -73,7 +73,6 @@ SPIDER_KWARGS = {
         "pid_end": "pid_end",
         "out_dir": "out",
         "value_source": "value_source",
-        "seed_radius": "seed_radius",
         "min_radius": "min_radius",
         "max_calls": "max_calls",
     },
@@ -125,11 +124,9 @@ def main():
     parser.add_argument("--granit-geojson", help="NH only, single-town pre-downloaded geojson")
     parser.add_argument("--value-source", choices=["vgsi", "offmarket"], default="vgsi",
                          help="NH only: 'vgsi' (default, per-town VGSI scraping) or 'offmarket' "
-                              "(RealtyAPI/Zillow off-market values via per-town parcel-extent "
-                              "sweep -- see nh_spider.py's module docstring). Ignored for every "
-                              "other state.")
-    parser.add_argument("--seed-radius", type=float, default=2.0,
-                         help="NH offmarket path only: starting sweep radius in miles (default 2)")
+                              "(RealtyAPI/Zillow off-market values via a listing-seeded grid, "
+                              "split recursively where dense -- see nh_spider.py's module "
+                              "docstring). Ignored for every other state.")
     parser.add_argument("--min-radius", type=float, default=0.25,
                          help="NH offmarket path only: recursive splitting floor in miles (default 0.25)")
     parser.add_argument("--max-calls", type=int, default=200,
