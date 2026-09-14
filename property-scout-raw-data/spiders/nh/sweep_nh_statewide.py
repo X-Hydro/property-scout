@@ -51,6 +51,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from spiders.nh.nh_spider import NHSpider
 
 
+# CONFIRMED (2026-09): granit_parcel_downloader.py's town-name query
+# breaks on an unescaped single quote (GRANIT error: "Invalid SQL
+# statement") -- these are the only two NH towns with an apostrophe in
+# their name. NOT marked complete (they have no real data), NOT retried
+# every session either (both failed 3/3 attempts already, confirmed
+# reproducible, not transient) -- excluded explicitly here until
+# granit_parcel_downloader.py's query-building gets real SQL-string
+# escaping (double any ' before it goes into the WHERE clause). Remove a
+# name from this set once that fix lands, so it's swept normally again.
+KNOWN_BROKEN_TOWNS = {"Hart's Location", "Hale's"}
+
+
 def load_nh_town_list(boundaries_path: str) -> list[str]:
     with open(boundaries_path) as f:
         data = json.load(f)
@@ -96,10 +108,11 @@ def main():
 
     all_towns = load_nh_town_list(args.boundaries_geojson)
     completed = load_checkpoint(args.checkpoint)
-    remaining = [t for t in all_towns if t not in completed]
+    remaining = [t for t in all_towns if t not in completed and t not in KNOWN_BROKEN_TOWNS]
 
+    n_excluded = len([t for t in all_towns if t in KNOWN_BROKEN_TOWNS])
     print(f"{len(all_towns)} total NH town(s), {len(completed)} already completed, "
-          f"{len(remaining)} remaining\n")
+          f"{n_excluded} excluded (known GRANIT apostrophe bug), {len(remaining)} remaining\n")
 
     if not remaining:
         print("Nothing left to do -- statewide sweep is already complete per the checkpoint.")
