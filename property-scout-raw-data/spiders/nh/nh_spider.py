@@ -95,6 +95,12 @@ else:
 
 OFFMARKET_RAW_DIR = "offmarket-raw"  # per-town subdirectory for this town's raw sweep file only
 
+
+NH_SLU_TO_PROPERTY_TYPE = {
+    "11": "Single Family",
+    "12": "Two Family",
+}
+
 # The real, actual downstream requirement (Thale, 2026-09): gap analysis
 # compares a listing's price against nearby comps' values within ~200m.
 # A town with no listings at all gets nothing swept, since there'd be no
@@ -317,7 +323,7 @@ class NHSpider(StateSpider):
         lat, lon = _ring_centroid_from_geojson(geometry)
         pid = props.get("PID")
         record = {
-            "property_id": f"NH:{pid}" if pid else None,
+            "property_id": f"NH:{town}:{pid}" if pid else None,
             "state": "NH",
             "county": None,
             "municipality": props.get("Town") or town,
@@ -327,7 +333,8 @@ class NHSpider(StateSpider):
             "zip": None,
             "latitude": lat,
             "longitude": lon,
-            "acreage": _to_float(props.get("acres")),
+            "acreage": _to_float(props.get("acres")) if self.value_source == "vgsi"
+                       else _to_float(props.get("offmarket_acres")),
             "assessed_value": _to_float(props.get("total_market_value")),
             "assessed_land_value": None,
             "assessed_building_value": None,
@@ -338,7 +345,9 @@ class NHSpider(StateSpider):
             "bedrooms": None,
             "bathrooms": None,
             "year_built": None,
-            "property_type": props.get("land_use_desc"),
+            "property_type": NH_SLU_TO_PROPERTY_TYPE.get(props.get("SLU"))
+                              if self.value_source == "offmarket"
+                              else props.get("land_use_desc"),
             "source": "NH_GRANIT_VGSI" if self.value_source == "vgsi" else "NH_GRANIT_OFFMARKET",
             "source_url": None,
             "source_date": date.today().isoformat(),

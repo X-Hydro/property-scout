@@ -168,6 +168,8 @@ def load_offmarket_points(offmarket_dir: str, zip_codes: list[str] | None = None
             tax = rec.get("taxAssessment") or {}
             addr = rec.get("address") or {}
             price = rec.get("price") or {}
+            lot = rec.get("lotSizeWithUnit") or {}
+            acres = lot.get("lotSize") if lot.get("lotSizeUnit") == "acres" else None
 
             points.append({
                 "point": Point(lon, lat),
@@ -178,6 +180,7 @@ def load_offmarket_points(offmarket_dir: str, zip_codes: list[str] | None = None
                 "tax_assessed_value": tax.get("taxAssessedValue"),
                 "tax_assessment_year": tax.get("taxAssessmentYear"),
                 "list_or_last_price": price.get("value"),
+                "acres": acres,
                 "source_file": os.path.basename(path),
             })
 
@@ -266,6 +269,7 @@ def join_town_file(parcels_path: str, tree: STRtree, points: list[dict], out_pat
             props["tax_assessment_year"] = None
             props["match_method"] = None
             props["match_point_count"] = 0
+            props["offmarket_acres"] = None
         else:
             # See VALUE_PRIORITY at module level -- tax_assessed_value
             # preferred (parity with VGSI's real assessment semantics),
@@ -274,6 +278,7 @@ def join_town_file(parcels_path: str, tree: STRtree, points: list[dict], out_pat
             # wins; not exposed as a CLI flag on purpose.
             props["total_market_value"] = _resolve_value(match)
             props["offmarket_zpid"] = match["zpid"]
+            props["offmarket_acres"] = match.get("acres")
             props["offmarket_address"] = match["address"]
             props["tax_assessed_value"] = match["tax_assessed_value"]
             props["tax_assessment_year"] = match["tax_assessment_year"]
