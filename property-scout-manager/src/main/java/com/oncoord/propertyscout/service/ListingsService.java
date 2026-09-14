@@ -8,6 +8,8 @@ import com.oncoord.propertyscout.model.StateCityRec;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -114,6 +116,22 @@ public class ListingsService {
             String zipCode,
             String propertyType) {
 
+        return findListings(state, city, zipCode, propertyType, null);
+    }
+
+    /**
+     * @param since when non-null, restricts to listings with
+     *              fetched_at >= since (start of that day) -- e.g. to
+     *              recompute only what a targeted incremental scrape just
+     *              touched instead of the whole state.
+     */
+    public List<Listing> findListings(
+            String state,
+            String city,
+            String zipCode,
+            String propertyType,
+            LocalDate since) {
+
         StringBuilder sql = new StringBuilder(SELECT_COLUMNS + " WHERE UPPER(state) = UPPER(?)");
 
         List<Object> parameters = new ArrayList<>();
@@ -132,6 +150,15 @@ public class ListingsService {
         if (propertyType != null && !propertyType.isBlank()) {
             sql.append(" AND UPPER(property_type) = UPPER(?)");
             parameters.add(propertyType);
+        }
+
+        if (since != null) {
+            // atStartOfDay so this is correct whether fetched_at is a
+            // date or timestamp column -- comparing a bare LocalDate
+            // param against a timestamp column can otherwise exclude
+            // same-day rows depending on time-of-day.
+            sql.append(" AND fetched_at >= ?");
+            parameters.add(LocalDateTime.of(since, java.time.LocalTime.MIDNIGHT));
         }
 
         sql.append(" ORDER BY listed_date DESC NULLS LAST");

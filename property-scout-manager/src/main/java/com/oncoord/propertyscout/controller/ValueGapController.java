@@ -7,9 +7,11 @@ import com.oncoord.propertyscout.valuegap.GapResult;
 import com.oncoord.propertyscout.valuegap.ValueGapPipelineService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 
@@ -82,17 +84,22 @@ public class ValueGapController {
      * to poll: recompute is a background admin action now, not something a
      * live user waits on, so a couple minutes of blocking is fine. GET
      * /rank doesn't reflect the update until this call returns.
+     *
+     * since is optional (YYYY-MM-DD) -- when present, restricts the run to
+     * listings with fetched_at >= since, e.g. to pick up only what a
+     * targeted incremental scrape just touched instead of the whole state.
      */
     @PostMapping("/recompute")
     public ResponseEntity<?> recompute(
             @RequestParam String state,
             @RequestParam(required = false) String city,
             @RequestParam(required = false) String zipCode,
-            @RequestParam(required = false) String propertyType) {
+            @RequestParam(required = false) String propertyType,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate since) {
 
-        List<Listing> listings = listingsService.findListings(state, city, zipCode, propertyType);
-        log.info("Recompute request: state={} city={} zipCode={} propertyType={} -> {} listings",
-                state, city, zipCode, propertyType, listings.size());
+        List<Listing> listings = listingsService.findListings(state, city, zipCode, propertyType, since);
+        log.info("Recompute request: state={} city={} zipCode={} propertyType={} since={} -> {} listings",
+                state, city, zipCode, propertyType, since, listings.size());
         try {
             GapRecomputeService.RecomputeSummary summary = recomputeService.recomputeAndStore(listings);
             log.info("Recompute complete: {} listings, {} computed, {} with comps",
