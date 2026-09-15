@@ -1,32 +1,26 @@
 """
 Join GRANIT parcels + RealtyAPI/Zillow offmarket values — ValueGap (NH path)
 
-Sibling to join_parcels_assessments.py (the VGSI/MBLU-based join used for
-NH's old flow, and structurally for any MBLU-keyed source). This script
-exists because the offmarket source has NO shared key with GRANIT parcels
-at all -- no MBLU, no matching filename convention -- only a raw
-latitude/longitude per off-market property. So the join here is spatial
-(point-in-polygon), not a dict lookup on a normalized string key.
+This is NH's only value join now (the earlier VGSI/MBLU-based join and
+its town-scoped CSV pairing were removed 2026-09). The offmarket source
+has NO shared key with GRANIT parcels at all -- no MBLU, no matching
+filename convention -- only a raw latitude/longitude per off-market
+property. So the join here is spatial (point-in-polygon), not a dict
+lookup on a normalized string key.
 
-WHY THIS CAN'T MIRROR join_parcels_assessments.py's file-pairing model:
-that script pairs ONE town's GRANIT geojson with ONE same-town VGSI CSV,
-because VGSI is inherently town-scoped. RealtyAPI's /search/offmarket is
-ZIP-scoped instead, and zip boundaries don't align with town boundaries --
-a single zip can span parts of several towns, and a town can contain
-several zips. Pairing "town X's parcels" with "the zip file that happens to
-share X's name" would silently miss real matches near any town/zip
-boundary. Instead, every offmarket point from every swept zip is loaded
-into ONE combined spatial index first, and every parcel (across every town
-file) is matched against that whole combined set.
+WHY THE OFFMARKET POINTS CAN'T BE PAIRED PER-TOWN LIKE THE PARCEL FILES:
+RealtyAPI's /search/offmarket is ZIP-scoped, and zip boundaries don't
+align with town boundaries -- a single zip can span parts of several
+towns, and a town can contain several zips. Pairing "town X's parcels"
+with "the zip file that happens to share X's name" would silently miss
+real matches near any town/zip boundary. Instead, every offmarket point
+from every swept zip is loaded into ONE combined spatial index first, and
+every parcel (across every town file) is matched against that whole
+combined set.
 
-OUTPUT SCHEMA: deliberately reuses join_parcels_assessments.py's
-`total_market_value` field name so this plugs into the same
-load_property_values.py call MA/NJ/VT already use, unchanged. NOT YET
-CONFIRMED against load_property_values.py's actual source (that script's
-expected input shape wasn't available when this was written) -- verify
-field names match what it reads before trusting this for a real load, same
-caution as everywhere else this project has been burned by an unconfirmed
-schema assumption.
+OUTPUT SCHEMA: `total_market_value` is the field name load_property_values.py
+reads for assessed_value, confirmed against that script's actual COLUMNS
+list.
 
 MATCHING STRATEGY:
   1. Primary: strict point-in-polygon (shapely .within) against the parcel
@@ -40,15 +34,16 @@ MATCHING STRATEGY:
      than silently averaged away. A parcel-level value is inherently a
      compromise for multi-unit buildings -- there's no per-unit geometry
      to do better with here.
-  3. Fallback for near-miss geocodes: if no point strictly falls inside a
-     parcel, the nearest point within FALLBACK_MAX_DISTANCE_DEG is used
-     instead (match_method="nearest_fallback"), mirroring the
-     ST_Contains-with-ST_DWithin-fallback pattern already agreed on for
-     the eventual Postgres-side listing-to-parcel join. The fallback
-     distance is in DEGREES, not meters (~0.0005 deg is roughly 40-50m at
-     NH's latitude) -- an approximation, not a real geodesic distance;
-     tighten or convert to a proper projected-CRS distance if false
-     positives turn up during spot checks.
+  3. NO fallback: if no point strictly falls inside a parcel, that parcel
+     gets no value (match=None). A near-miss fallback (nearest point
+     within ~40-50m) was tried and removed 2026-09 -- it was silently
+     attributing a nearby, unrelated property's value AND address to a
+     parcel it wasn't actually inside, which looked like real data under
+     an authoritative-looking source tag (NH_GRANIT_OFFMARKET) and
+     corrupted gap-analysis comps. See conversation re: Freedom NH's
+     "144 West Bay Road" parcel, which is what surfaced this. A NULL
+     value is a visible, honest gap; a wrong value silently masquerading
+     as a real one is worse.
 
 REQUIRES shapely>=2.0 -- STRtree.query() returns integer indices into the
 input geometry list in 2.x, not geometries directly as in 1.x. This script
@@ -73,8 +68,6 @@ import os
 
 from shapely.geometry import shape, Point
 from shapely.strtree import STRtree
-
-FALLBACK_MAX_DISTANCE_DEG = 0.0005  # ~40-50m at NH's latitude -- approximation, see module docstring
 
 # Which offmarket field becomes `total_market_value` -- first non-null field
 # in this list wins, per match. Default: tax_assessed_value (parity with
@@ -219,21 +212,9 @@ def match_parcel(parcel_geom, tree: STRtree, points: list[dict]):
         best_idx = min(inside, key=lambda i: points[i]["point"].distance(centroid))
         return points[best_idx], "point_in_polygon", len(inside), points[best_idx]["point"].distance(centroid)
 
-    # No strict containment -- fall back to nearest point within threshold,
-    # searched over ALL points (not just the bbox-filtered candidates from
-    # the query above, since a near-miss point right outside a thin/sliver
-    # parcel might not even share a bbox with it).
-    nearest_idx = None
-    nearest_dist = None
-    for i, p in enumerate(points):
-        d = parcel_geom.distance(p["point"])
-        if nearest_dist is None or d < nearest_dist:
-            nearest_dist = d
-            nearest_idx = i
-
-    if nearest_idx is not None and nearest_dist <= FALLBACK_MAX_DISTANCE_DEG:
-        return points[nearest_idx], "nearest_fallback", 0, nearest_dist
-
+    # No strict containment -- no value assigned for this parcel. (See
+    # module docstring: a near-miss fallback used to run here and was
+    # removed 2026-09.)
     return None, None, 0, None
 
 
@@ -292,7 +273,7 @@ def join_town_file(parcels_path: str, tree: STRtree, points: list[dict], out_pat
             if n_candidates > 1:
                 multi_candidate_count += 1
 
-        joined_features.append(feature)  # kept either way -- left join, same as join_parcels_assessments.py
+        joined_features.append(feature)  # kept either way -- left join, unmatched parcels get null value fields
 
     out = {"type": "FeatureCollection", "features": joined_features}
     with open(out_path, "w") as f:

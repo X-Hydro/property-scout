@@ -1,63 +1,49 @@
 """
 New Hampshire spider — Property Values Database
 
-TWO value sources, selected via value_source:
+Value source: GRANIT parcel geometry + RealtyAPI/Zillow off-market
+values, joined via point-in-polygon. NH has no single authoritative
+statewide assessed-value source, so this routes around per-town VGSI
+scraping entirely (removed 2026-09 -- VGSI's per-town scraping was slow
+and never reached full statewide coverage; offmarket, though budget-
+constrained by RealtyAPI's 2,000 calls/month cap, is at least a single
+consistent path with real checkpointed progress).
 
-  - "vgsi" (default, unchanged): GRANIT parcel geometry + VGSI assessed
-    value, joined on MBLU. Original path, per-town VGSI scraping.
+CONFIRMED (2026-09): a single zipCode-based /search/offmarket call is a
+SAMPLE, not a complete set (RealtyAPI support's own words) -- measured
+~85% of a real cluster missing on one small NH zip. The reliable approach
+is recursive radius-based splitting (pageResultCount hitting 1000 means
+the area needs splitting into 4 sub-cells; below 1000 means genuinely
+complete for that area), tiled across a town's real parcel extent --
+implemented in offmarket_value_sweep.py (project root, state-agnostic,
+no NH-specific code in it).
 
-  - "offmarket": GRANIT parcel geometry + RealtyAPI/Zillow off-market
-    values, joined via point-in-polygon. Built to route around VGSI's
-    fragile per-town scraping, since NH has no single authoritative
-    statewide assessed-value source.
+RUNS ENTIRELY PER-TOWN, inside fetch_town(). fetch_town() needs a town's
+PARCELS first (to build its seed grid), fetched via _get_granit_geojson()
+before anything offmarket-related runs.
 
-    CONFIRMED (2026-09): a single zipCode-based /search/offmarket call is
-    a SAMPLE, not a complete set (RealtyAPI support's own words) --
-    measured ~85% of a real cluster missing on one small NH zip. The
-    reliable approach is recursive radius-based splitting (pageResultCount
-    hitting 1000 means the area needs splitting into 4 sub-cells; below
-    1000 means genuinely complete for that area), tiled across a town's
-    real parcel extent -- implemented in offmarket_value_sweep.py (project root,
-    state-agnostic, no NH-specific code in it).
-
-    RUNS ENTIRELY PER-TOWN, inside fetch_town() -- unlike an earlier
-    version of this file, there is NO state-level prep step in __init__
-    anymore. The old design fetched a statewide listings file first
-    (to pick which zip codes to sweep); the new approach needs a town's
-    PARCELS first (to build its seed grid), which fetch_town() already
-    gets via _get_granit_geojson() before anything offmarket-related runs.
-
-    BUDGET, CONFIRMED CONSTRAINT (2026-09): RealtyAPI plan is capped at
-    2,000 calls/month. A rough per-town estimate (56-105 calls seen on
-    Lebanon/Lincoln, before a caching fix that reduced Lincoln's real
-    cost -- re-test recommended) times ~234 NH towns is WAY over that
-    budget for a single statewide pass. Two known mitigations, NEITHER
-    implemented here yet: (1) scope to only towns with active listings,
-    not all 234 (see conversation -- most towns may have none); (2) a
-    resumable checkpoint so a statewide sweep spans several months'
-    budget instead of needing to fit in one. For now, run town-by-town
-    deliberately (--towns X), not --all-towns, until one of those exists.
+BUDGET, CONFIRMED CONSTRAINT (2026-09): RealtyAPI plan is capped at
+2,000 calls/month. A rough per-town estimate (56-105 calls seen on
+Lebanon/Lincoln, before a caching fix that reduced Lincoln's real cost --
+re-test recommended) times ~259 NH towns is WAY over that budget for a
+single statewide pass. sweep_nh_statewide.py spreads a full pass across
+however many monthly runs it actually takes, via a resumable checkpoint.
 
 Usage:
-    # Original VGSI path, unchanged:
-    python -m spiders.nh_spider Lincoln --town-slug lincolnnh --pid-end 20000 --out data/
-
-    # New offmarket path, per-town parcel-extent sweep:
-    python -m spiders.nh_spider Lincoln --value-source offmarket --out data/
-    python -m spiders.nh_spider Lincoln --value-source offmarket --max-calls 150 --out data/
+    python -m spiders.nh_spider Lincoln --out data/
+    python -m spiders.nh_spider Lincoln --max-calls 150 --out data/
 """
 
 import sys
 import os
 import json
-import math
 import argparse
 from pathlib import Path
 from datetime import date
 
 from ..common.base import StateSpider, SpiderError
 
-PIPELINE_DIR = Path(__file__).parent          # spiders/nh/ -- NH-SPECIFIC: GRANIT fetch, VGSI scraper, MBLU join
+PIPELINE_DIR = Path(__file__).parent          # spiders/nh/ -- NH-SPECIFIC: GRANIT fetch
 PROJECT_ROOT = PIPELINE_DIR.parent.parent      # project root -- STATE-AGNOSTIC: offmarket_value_sweep.py,
                                                 # join_parcels_offmarket.py, realtyapi_bypolygon_state.py, etc.
 sys.path.insert(0, str(PIPELINE_DIR))
@@ -75,17 +61,11 @@ if _missing_root_files:
 
 try:
     import granit_parcel_downloader     # NH-specific (spiders/nh/)
-    import vgsi_assessment_scraper      # NH-specific (spiders/nh/) -- required import even when
-                                         # running the offmarket path; not called, but this file's
-                                         # top-level import block is unconditional either way
-    import join_parcels_assessments     # NH-specific (spiders/nh/) -- VGSI's MBLU join
-    import offmarket_value_sweep                 # state-agnostic (project root) -- the per-town sweep itself
+    import offmarket_value_sweep        # state-agnostic (project root) -- the per-town sweep itself
     import join_parcels_offmarket       # state-agnostic (project root) -- point-in-polygon join
     import offmarket_to_geojson         # state-agnostic (project root) -- QGIS-loadable debug points
 except ImportError as e:
     granit_parcel_downloader = None
-    vgsi_assessment_scraper = None
-    join_parcels_assessments = None
     offmarket_value_sweep = None
     join_parcels_offmarket = None
     offmarket_to_geojson = None
@@ -94,7 +74,6 @@ else:
     _IMPORT_ERROR = None
 
 OFFMARKET_RAW_DIR = "offmarket-raw"  # per-town subdirectory for this town's raw sweep file only
-
 
 NH_SLU_TO_PROPERTY_TYPE = {
     "11": "Single Family",
@@ -118,10 +97,6 @@ NH_SLU_TO_PROPERTY_TYPE = {
 # here either -- a 2-mile cell already covers far more than the 200m
 # gap-analysis comp radius on its own.
 SEED_RADIUS_MILES = 2.0
-
-
-def _guess_vgsi_town_slug(town: str) -> str:
-    return town.lower().replace(" ", "") + "nh"
 
 
 def _ring_centroid_from_geojson(geometry: dict | None) -> tuple[float | None, float | None]:
@@ -159,9 +134,7 @@ def _to_float(v):
 class NHSpider(StateSpider):
     state_code = "NH"
 
-    def __init__(self, granit_geojson: str = None, town_slug: str = None,
-                 pid_end: int = 20000, out_dir: str = "data",
-                 value_source: str = "vgsi",
+    def __init__(self, granit_geojson: str = None, out_dir: str = "data",
                  min_radius: float = 0.25, max_calls: int = 200,
                  listings_file: str = None):
         if _IMPORT_ERROR is not None:
@@ -169,15 +142,10 @@ class NHSpider(StateSpider):
                 f"Could not import the NH pipeline scripts from {PIPELINE_DIR} -- "
                 f"make sure all required modules are there. Original error: {_IMPORT_ERROR}"
             )
-        if value_source not in ("vgsi", "offmarket"):
-            raise SpiderError(f"value_source must be 'vgsi' or 'offmarket', got {value_source!r}")
 
         self.granit_geojson_override = granit_geojson
-        self.town_slug_override = town_slug
-        self.pid_end = pid_end
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.value_source = value_source
         self.min_radius = min_radius
         self.max_calls = max_calls
         self.total_api_calls = 0  # accumulates across every fetch_town() call this spider
@@ -185,8 +153,8 @@ class NHSpider(StateSpider):
                                    # sweep_nh_statewide.py) track real cumulative cost across a
                                    # whole session, not just per-town
 
-        if value_source == "offmarket" and not os.environ.get("REALTYAPI_KEY"):
-            raise SpiderError("value_source='offmarket' requires REALTYAPI_KEY set in the environment")
+        if not os.environ.get("REALTYAPI_KEY"):
+            raise SpiderError("REALTYAPI_KEY must be set in the environment")
 
         # Listings-scoped seeding -- a real, accepted dependency on the
         # statewide listings file existing already, since seed_grid() is
@@ -195,10 +163,10 @@ class NHSpider(StateSpider):
         # nothing gets swept for that town -- intentional, not a bug: no
         # listing means no possible gap-analysis comparison there.
         self.listings_file = listings_file or str(PROJECT_ROOT / "realtyapi-data" / "realtyapi_nh.json")
-        if value_source == "offmarket" and not os.path.exists(self.listings_file):
+        if not os.path.exists(self.listings_file):
             raise SpiderError(
-                f"value_source='offmarket' requires a statewide listings file at "
-                f"{self.listings_file} (or pass listings_file= explicitly) -- run "
+                f"requires a statewide listings file at {self.listings_file} "
+                f"(or pass listings_file= explicitly) -- run "
                 f"`python realtyapi_bypolygon_state.py NH --property-type single_family,land` "
                 f"first to generate it."
             )
@@ -322,33 +290,51 @@ class NHSpider(StateSpider):
         geometry = feature.get("geometry")
         lat, lon = _ring_centroid_from_geojson(geometry)
         pid = props.get("PID")
+        # FIXED 2026-09: property_id used to build its town segment from the
+        # raw `town` argument passed into this run (CLI-typed or however the
+        # caller cased it), while `municipality` below already preferred
+        # GRANIT's own Town property instead. The two callers of fetch_town()
+        # in this project (sweep_nh_statewide.py, reading town names from
+        # newengland_town_boundaries.json, vs. a manual `python -m
+        # spiders.nh.nh_spider <Town>` CLI run) don't always agree on casing
+        # for the same town -- CONFIRMED: Freedom loaded as both
+        # "NH:freedom:2-2" (statewide sweep) and "NH:Freedom:2-2" (manual
+        # re-run), producing two separate DB rows for one physical parcel
+        # instead of the second upsert overwriting the first. Resolving
+        # municipality ONCE here and using that same value for both fields
+        # closes the gap -- property_id's town segment now always matches
+        # GRANIT's own casing, regardless of how the caller typed/sourced
+        # the town name.
+        municipality = props.get("Town") or town
         record = {
-            "property_id": f"NH:{town}:{pid}" if pid else None,
+            "property_id": f"NH:{municipality}:{pid}" if pid else None,
             "state": "NH",
             "county": None,
-            "municipality": props.get("Town") or town,
+            "municipality": municipality,
             "parcel_id": pid,
-            "address": props.get("vgsi_location") or props.get("offmarket_address") or props.get("StreetAddress"),
-            "city": props.get("Town") or town,
+            # offmarket_address only ever gets set on a real match (see
+            # join_parcels_offmarket.py) -- now that matches are strict
+            # point-in-polygon only, it always belongs to a point
+            # genuinely inside this parcel. Falls back to GRANIT's own
+            # StreetAddress when there was no match at all.
+            "address": props.get("offmarket_address") or props.get("StreetAddress"),
+            "city": municipality,
             "zip": None,
             "latitude": lat,
             "longitude": lon,
-            "acreage": _to_float(props.get("acres")) if self.value_source == "vgsi"
-                       else _to_float(props.get("offmarket_acres")),
+            "acreage": _to_float(props.get("offmarket_acres")),
             "assessed_value": _to_float(props.get("total_market_value")),
             "assessed_land_value": None,
             "assessed_building_value": None,
-            "assessment_year": props.get("tax_assessment_year"),  # populated on the offmarket path only
+            "assessment_year": props.get("tax_assessment_year"),
             "last_sale_price": None,
             "last_sale_date": None,
             "building_sqft": None,
             "bedrooms": None,
             "bathrooms": None,
             "year_built": None,
-            "property_type": NH_SLU_TO_PROPERTY_TYPE.get(props.get("SLU"))
-                              if self.value_source == "offmarket"
-                              else props.get("land_use_desc"),
-            "source": "NH_GRANIT_VGSI" if self.value_source == "vgsi" else "NH_GRANIT_OFFMARKET",
+            "property_type": NH_SLU_TO_PROPERTY_TYPE.get(props.get("SLU")),
+            "source": "NH_GRANIT_OFFMARKET",
             "source_url": None,
             "source_date": date.today().isoformat(),
             "_geometry": geometry,
@@ -358,44 +344,33 @@ class NHSpider(StateSpider):
     def fetch_town(self, town: str) -> list[dict]:
         granit_geojson_path = self._get_granit_geojson(town)
 
-        if self.value_source == "offmarket":
-            offmarket_dir = self._sweep_offmarket_for_town(town, granit_geojson_path)
-            joined_geojson = str(self.out_dir / f"{town.lower()}_nh_offmarket_joined.geojson")
+        offmarket_dir = self._sweep_offmarket_for_town(town, granit_geojson_path)
+        joined_geojson = str(self.out_dir / f"{town.lower()}_nh_offmarket_joined.geojson")
 
-            with open(Path(offmarket_dir) / f"{town.lower()}_nh_offmarket_raw.json") as f:
-                raw_count = len(json.load(f).get("offMarketResults", []))
+        with open(Path(offmarket_dir) / f"{town.lower()}_nh_offmarket_raw.json") as f:
+            raw_count = len(json.load(f).get("offMarketResults", []))
 
-            if raw_count == 0:
-                # No listings in this town -> nothing was swept, intentionally (see
-                # _sweep_offmarket_for_town). Pass GRANIT parcels through with null value
-                # fields instead of calling load_offmarket_points, which raises on zero
-                # points -- this is expected here, not a real failure.
-                print(f"  [offmarket] {town}: 0 swept records, passing parcels through with "
-                      f"null values (no listings to compare against in this town)")
-                with open(granit_geojson_path) as f:
-                    parcels = json.load(f)
-                for feature in parcels["features"]:
-                    for field in ("total_market_value", "offmarket_zpid", "offmarket_address",
-                                  "tax_assessed_value", "tax_assessment_year", "match_method",
-                                  "match_point_count"):
-                        feature["properties"].setdefault(field, None if field != "match_point_count" else 0)
-                with open(joined_geojson, "w") as f:
-                    json.dump(parcels, f)
-            else:
-                points = join_parcels_offmarket.load_offmarket_points(offmarket_dir)
-                tree = join_parcels_offmarket.build_index(points)
-                print(f"  joining GRANIT parcels + offmarket points for {town}...")
-                join_parcels_offmarket.join_town_file(granit_geojson_path, tree, points, joined_geojson)
+        if raw_count == 0:
+            # No listings in this town -> nothing was swept, intentionally (see
+            # _sweep_offmarket_for_town). Pass GRANIT parcels through with null value
+            # fields instead of calling load_offmarket_points, which raises on zero
+            # points -- this is expected here, not a real failure.
+            print(f"  [offmarket] {town}: 0 swept records, passing parcels through with "
+                  f"null values (no listings to compare against in this town)")
+            with open(granit_geojson_path) as f:
+                parcels = json.load(f)
+            for feature in parcels["features"]:
+                for field in ("total_market_value", "offmarket_zpid", "offmarket_address",
+                              "tax_assessed_value", "tax_assessment_year", "match_method",
+                              "match_point_count"):
+                    feature["properties"].setdefault(field, None if field != "match_point_count" else 0)
+            with open(joined_geojson, "w") as f:
+                json.dump(parcels, f)
         else:
-            town_slug = self.town_slug_override or _guess_vgsi_town_slug(town)
-            assessments_csv = str(self.out_dir / f"{town.lower()}_nh_assessments.csv")
-            joined_geojson = str(self.out_dir / f"{town.lower()}_nh_joined.geojson")
-            print(f"  scraping VGSI ({town_slug}, pid_end={self.pid_end})...")
-            vgsi_assessment_scraper.scrape_town(
-                town_slug, 1, self.pid_end, granit_geojson_path, assessments_csv
-            )
-            print("  joining GRANIT + VGSI...")
-            join_parcels_assessments.join(granit_geojson_path, assessments_csv, joined_geojson)
+            points = join_parcels_offmarket.load_offmarket_points(offmarket_dir)
+            tree = join_parcels_offmarket.build_index(points)
+            print(f"  joining GRANIT parcels + offmarket points for {town}...")
+            join_parcels_offmarket.join_town_file(granit_geojson_path, tree, points, joined_geojson)
 
         with open(joined_geojson) as f:
             joined = json.load(f)
@@ -406,12 +381,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("towns", nargs="+", help="NH town names, e.g. Lincoln")
     parser.add_argument("--granit-geojson", help="single-town pre-downloaded GRANIT geojson override")
-    parser.add_argument("--town-slug", help="VGSI town slug override, e.g. lincolnnh (vgsi path only)")
-    parser.add_argument("--pid-end", type=int, default=20000)
-    parser.add_argument("--value-source", choices=["vgsi", "offmarket"], default="vgsi")
-    parser.add_argument("--min-radius", type=float, default=0.25, help="offmarket path only")
+    parser.add_argument("--min-radius", type=float, default=0.25)
     parser.add_argument("--max-calls", type=int, default=200,
-                         help="offmarket path only -- PER-TOWN budget, not statewide")
+                         help="PER-TOWN budget, not statewide")
     parser.add_argument("--out", default="data")
     args = parser.parse_args()
 
@@ -421,10 +393,7 @@ def main():
 
     spider = NHSpider(
         granit_geojson=args.granit_geojson,
-        town_slug=args.town_slug,
-        pid_end=args.pid_end,
         out_dir=args.out,
-        value_source=args.value_source,
         min_radius=args.min_radius,
         max_calls=args.max_calls,
     )

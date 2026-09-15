@@ -118,9 +118,13 @@ def main():
         print("Nothing left to do -- statewide sweep is already complete per the checkpoint.")
         return
 
+    # FIXED 2026-09: NHSpider's value_source param was removed when the
+    # VGSI path was cut (offmarket is the only path now) -- this call was
+    # left passing value_source="offmarket" as a stale leftover kwarg,
+    # which NHSpider.__init__ no longer accepts at all (TypeError:
+    # unexpected keyword argument).
     spider = NHSpider(
         out_dir=args.out,
-        value_source="offmarket",
         min_radius=args.min_radius,
         max_calls=args.max_calls,
     )
@@ -136,7 +140,14 @@ def main():
                   f"remain for next month's run.")
             break
 
-        print(f"\n=== {town} ({len(completed) + len(session_completed) + 1}/{len(all_towns)} "
+        # FIXED 2026-09: previously len(completed) + len(session_completed) + 1
+        # -- double-counted, since completed.add(town) happens right after
+        # session_completed.append(town) below for every processed town, so
+        # session_completed is a strict subset already reflected in
+        # completed. completed alone is the real running total (confirmed:
+        # progress counters like "373/258" mid-run were this double-count,
+        # not a real over-total bug).
+        print(f"\n=== {town} ({len(completed) + 1}/{len(all_towns)} "
               f"statewide) ===")
         try:
             spider.run([town], args.out)
