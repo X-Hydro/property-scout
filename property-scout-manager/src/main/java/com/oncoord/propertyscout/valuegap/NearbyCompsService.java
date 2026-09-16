@@ -40,6 +40,7 @@ public class NearbyCompsService {
     private static final double DEFAULT_CLOSE_RADIUS_M = 100;
     private static final double DEFAULT_FAR_RADIUS_M = 250;
     private static final double DEFAULT_LOT_SIZE_RATIO_TOLERANCE = 2.5;
+    private static final double DEFAULT_TOUCHING_LOT_SIZE_RATIO_TOLERANCE = 6.0; // looser backstop for true abutters
     private static final double TOUCH_TOLERANCE_M = 5; // ~ NEIGHBOR_BUFFER_DEG in find_abutters.py
     private static final double SQM_PER_ACRE = 4046.8564224; // matches find_abutters.py's constant exactly
     private static final double SQFT_PER_ACRE = 43560;
@@ -137,7 +138,8 @@ public class NearbyCompsService {
     }
 
     public List<CompCandidate> findComps(TargetParcel target, boolean targetIsLand) {
-        return findComps(target, targetIsLand, DEFAULT_CLOSE_RADIUS_M, DEFAULT_FAR_RADIUS_M, DEFAULT_LOT_SIZE_RATIO_TOLERANCE);
+        return findComps(target, targetIsLand, DEFAULT_CLOSE_RADIUS_M, DEFAULT_FAR_RADIUS_M,
+                DEFAULT_LOT_SIZE_RATIO_TOLERANCE, DEFAULT_TOUCHING_LOT_SIZE_RATIO_TOLERANCE);
     }
 
     public List<CompCandidate> findComps(
@@ -145,7 +147,8 @@ public class NearbyCompsService {
             boolean targetIsLand,
             double closeRadiusM,
             double farRadiusM,
-            double lotSizeRatioTolerance) {
+            double lotSizeRatioTolerance,
+            double touchingLotSizeRatioTolerance) {
 
         String targetStreet = ValueGapUtils.streetNameOnly(target.getAddress());
 
@@ -239,7 +242,17 @@ public class NearbyCompsService {
             if (address == null || address.isBlank()) {
                 return;
             }
-            if (!ValueGapUtils.lotSizeSimilar(target.getAcres(), acres, lotSizeRatioTolerance)) {
+            // A true abutter (shares a boundary with the target, within
+            // TOUCH_TOLERANCE_M) still needs to pass a size-sanity check --
+            // touching only confirms "same immediate location," not "fair
+            // value comp" (e.g. a 0.135-acre postage-stamp lot touching a
+            // 1+ acre parcel is a different kind of property). But it
+            // shouldn't be held to the same tight ratio as a radius-only
+            // candidate, since an oversized/land target next to normal-sized
+            // built lots would otherwise lose its closest neighbors. Use a
+            // separate, looser tolerance instead of skipping the check.
+            double effectiveRatioTolerance = touches ? touchingLotSizeRatioTolerance : lotSizeRatioTolerance;
+            if (!ValueGapUtils.lotSizeSimilar(target.getAcres(), acres, effectiveRatioTolerance)) {
                 return;
             }
             if (rawPropertyType != null && !COMP_ELIGIBLE_TYPES.contains(propertyType)) {
