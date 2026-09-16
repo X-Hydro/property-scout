@@ -528,6 +528,41 @@ class RISpider(StateSpider):
         # its value) is the reliable signal.
         is_offmarket = "total_market_value" in attrs
 
+        # See join_parcels_offmarket.py's load_offmarket_points() -- city/zip
+        # are now captured from the offmarket record's own address, a real
+        # per-parcel value confirmed from an actual record (address.city=
+        # "Bristol"), strictly better than TOWN_CODE_TO_NAME (still empty --
+        # see that constant's own comment) since it doesn't depend on that
+        # table ever being filled in.
+        offmarket_city = attrs.get("offmarket_city") if is_offmarket else None
+        offmarket_zip = attrs.get("offmarket_zip") if is_offmarket else None
+
+        # LAND INFERENCE (offmarket-only rule): overrides property_type to
+        # "Vacant Land" only when ALL THREE hold:
+        #   1. The parcel's own RIDEM E911Desc is blank/"None" (E911
+        #      addresses structures; nothing to address on an empty lot --
+        #      confirmed 2026-09 this is overwhelmingly vacant land, not
+        #      missing data). standardize_property_type() passes an
+        #      unrecognized raw string through unchanged, so a literal
+        #      "None" string (not Python None) is a real, confirmed value
+        #      here, not a sentinel -- checked for explicitly below.
+        #   2. A matched offmarket point's propertyType is "land".
+        #   3. That SAME offmarket point's yearBuilt is null.
+        # Condition 3 is deliberate, not a leftover: a real yearBuilt means
+        # RealtyAPI itself has record of an actual structure at some point,
+        # even if RIDEM's own E911Desc is currently blank -- confirmed
+        # real example (zpid 110670513, "12 Milk St"/BR 14-119): propertyType
+        # "land" but yearBuilt=2019, NOT treated as land under this rule.
+        # Only trust an offmarket "land" call when there's no year-built
+        # signal at all contradicting it.
+        parcel_type = standardize_property_type(attrs.get("E911Desc"))
+        no_parcel_type = parcel_type is None or parcel_type.strip() == "" or parcel_type.strip().lower() == "none"
+        if is_offmarket and no_parcel_type:
+            offmarket_ptype = (attrs.get("offmarket_property_type") or "").strip().lower()
+            offmarket_yr_built = attrs.get("offmarket_year_built")
+            if offmarket_ptype == "land" and offmarket_yr_built is None:
+                parcel_type = "Vacant Land"  # canonical name per property_types.py's own docstring example
+
         record = {
             "property_id": f"RI:{town_code}:{plat_lot}" if plat_lot else None,
             "state": "RI",
@@ -535,8 +570,8 @@ class RISpider(StateSpider):
             "municipality": TOWN_CODE_TO_NAME.get(town_code) or attrs.get("TownCode") or town_code,
             "parcel_id": plat_lot,
             "address": attrs.get("offmarket_address") if is_offmarket else None,
-            "city": TOWN_CODE_TO_NAME.get(town_code) if is_offmarket else None,
-            "zip": None,
+            "city": offmarket_city or (TOWN_CODE_TO_NAME.get(town_code) if is_offmarket else None),
+            "zip": offmarket_zip,
             "latitude": lat,
             "longitude": lon,
             "acreage": _num(attrs, "Acres"),
@@ -549,8 +584,8 @@ class RISpider(StateSpider):
             "building_sqft": None,
             "bedrooms": None,
             "bathrooms": None,
-            "year_built": None,
-            "property_type": standardize_property_type(attrs.get("E911Desc")),
+            "year_built": attrs.get("offmarket_year_built") if is_offmarket else None,
+            "property_type": parcel_type,
             "source": SOURCE_TAG_OFFMARKET if is_offmarket else SOURCE_TAG_DEM,
             "source_url": BASE_QUERY_URL,
             "source_date": date.today().isoformat(),
@@ -558,10 +593,6 @@ class RISpider(StateSpider):
         }
         for src_field, out_key in _PASSTHROUGH_FIELDS.items():
             record[out_key] = attrs.get(src_field)
-        if is_offmarket:
-            record["ri_offmarket_match_method"] = attrs.get("match_method")
-            record["ri_offmarket_match_point_count"] = attrs.get("match_point_count")
-            record["ri_offmarket_zpid"] = attrs.get("offmarket_zpid")
         return record
 
     def fetch_town(self, town: str) -> list[dict]:
