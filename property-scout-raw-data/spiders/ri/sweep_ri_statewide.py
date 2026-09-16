@@ -193,6 +193,16 @@ def cmd_join(args):
                                                                # value fields by their actual presence, not
                                                                # by this flag (see ri_spider.py fix)
     codes = spider.list_towns()
+    if args.towns:
+        requested = {c.upper() for c in args.towns}
+        unknown = requested - set(codes)
+        if unknown:
+            print(f"WARNING: {sorted(unknown)} not real TownCode value(s) (ignored) -- "
+                  f"real codes: {codes}")
+        codes = [c for c in codes if c in requested]
+        if not codes:
+            print("No matching TownCode(s) to join -- nothing to do.")
+            return
     failed_codes = []
     for code in codes:
         print(f"[{code}] fetching parcels + joining...")
@@ -264,8 +274,10 @@ def main():
     p_sweep.set_defaults(func=cmd_sweep)
 
     p_join = sub.add_parser("join", help="zero API calls, safe to rerun anytime")
-    p_join.add_argument("--cache", default=DEFAULT_CACHE)
     p_join.add_argument("--out", default="ri_data_statewide")
+    p_join.add_argument("--cache", default=DEFAULT_CACHE)
+    p_join.add_argument("--towns", nargs="+", default=None,
+                         help="limit to specific TownCode(s), e.g. --towns CR -- default: all 39")
     p_join.set_defaults(func=cmd_join)
 
     p_migrate = sub.add_parser("migrate", help="fold an old per-town run's records into the shared cache")
