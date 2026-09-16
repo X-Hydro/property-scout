@@ -175,7 +175,8 @@ public class GapRecomputeService {
                   AND (?::numeric IS NULL OR l.price <= ?)
                   AND l.status IN (%s)
                   AND g.has_comps = true
-                ORDER BY l.property_type, g.gap DESC
+                  AND g.comp_count > 0
+                ORDER BY l.property_type, g.gap DESC NULLS LAST
                 """).formatted(statusPlaceholders);
 
         List<Object> args = new ArrayList<>();
