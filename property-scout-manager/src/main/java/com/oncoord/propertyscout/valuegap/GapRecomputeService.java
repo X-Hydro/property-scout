@@ -154,7 +154,7 @@ public class GapRecomputeService {
     }
 
     public Map<String, Object> findRanked(String state, String city, String zipCode,
-                                          String propertyType, Integer limit, List<String> statuses) {
+                                          String propertyType, Double maxPrice, Integer limit, List<String> statuses) {
         List<String> effectiveStatuses = (statuses == null || statuses.isEmpty())
                 ? DEFAULT_STATUSES
                 : statuses;
@@ -172,6 +172,7 @@ public class GapRecomputeService {
                   AND (?::text IS NULL OR l.city = ?)
                   AND (?::text IS NULL OR l.zip_code = ?)
                   AND (?::text IS NULL OR l.property_type = ?)
+                  AND (?::numeric IS NULL OR l.price <= ?)
                   AND l.status IN (%s)
                   AND g.has_comps = true
                 ORDER BY l.property_type, g.gap DESC
@@ -185,6 +186,8 @@ public class GapRecomputeService {
         args.add(zipCode);
         args.add(propertyType);
         args.add(propertyType);
+        args.add(maxPrice);
+        args.add(maxPrice);
         args.addAll(effectiveStatuses);
 
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, args.toArray());

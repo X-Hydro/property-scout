@@ -52,6 +52,15 @@ public class ValueGapController {
      * property type across the whole state, for a "biggest gaps, don't care
      * what town" view, rather than every matching listing statewide.
      *
+     * maxPrice is optional and is applied in the WHERE clause, BEFORE limit
+     * truncation -- e.g. limit=25&maxPrice=1000000 returns the top 25 by gap
+     * among listings priced at or below $1M, not the top 25 overall with
+     * anything over $1M stripped out afterward (which could leave fewer
+     * than 25, or zero, results if the biggest-gap listings all happen to
+     * be expensive). This only affects what /rank returns -- gap_results
+     * itself is still computed for every listing regardless of price via
+     * POST /recompute, so nothing is lost, just filtered at read time.
+     *
      * statuses is optional, comma-separated (e.g. statuses=Active,Pending)
      * -- Spring binds a repeated/comma-separated query param straight to
      * List<String>. Defaults to Active-only when omitted (see
@@ -64,11 +73,12 @@ public class ValueGapController {
             @RequestParam(required = false) String city,
             @RequestParam(required = false) String zipCode,
             @RequestParam(required = false) String propertyType,
+            @RequestParam(required = false) Double maxPrice,
             @RequestParam(required = false) Integer limit,
             @RequestParam(required = false) List<String> statuses) {
 
         try {
-            return ResponseEntity.ok(recomputeService.findRanked(state, city, zipCode, propertyType, limit, statuses));
+            return ResponseEntity.ok(recomputeService.findRanked(state, city, zipCode, propertyType, maxPrice, limit, statuses));
         } catch (Exception e) {
             log.error("Rank query failed: state={} city={}", state, city, e);
             return ResponseEntity.internalServerError()
