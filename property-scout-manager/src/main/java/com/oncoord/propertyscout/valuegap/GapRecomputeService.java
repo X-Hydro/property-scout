@@ -98,15 +98,6 @@ public class GapRecomputeService {
         }
         log.info("Processed {} of {} records ({} failed)", processed, total, failed);
 
-
-        // rank() sets relativeGapPct on each result as a side effect
-        // (group-relative to gapPct within its property type) -- the
-        // grouped/sorted return value itself isn't needed here (findRanked
-        // does its own grouping at read time straight from the DB), but
-        // without this call relativeGapPct silently stays null forever,
-        // since nothing else ever calls the setter. That's exactly what
-        // was happening before this fix -- relative_gap_pct has been NULL
-        // for every persisted row.
         gapRankingService.rank(results);
 
         int hasCompsCount = (int) results.stream().filter(GapResult::isHasComps).count();

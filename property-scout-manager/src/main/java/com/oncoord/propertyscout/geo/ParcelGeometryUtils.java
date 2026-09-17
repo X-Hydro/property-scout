@@ -16,6 +16,7 @@ import org.locationtech.jts.geom.Polygon;
  */
 public final class ParcelGeometryUtils {
 
+    public static final double SQM_PER_ACRE = 4046.8564224;
     private static final double METERS_PER_DEGREE_LAT = 111_320.0;
 
     private ParcelGeometryUtils() {

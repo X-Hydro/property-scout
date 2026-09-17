@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.*;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @RestController
 @RequestMapping("/api/value-gap")
@@ -122,6 +123,24 @@ public class ValueGapController {
             // generic {"status":500,"error":"Internal Server Error"} body.
             // Full stack trace still goes to the server log either way.
             log.error("Recompute failed: state={} city={}", state, city, e);
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("error", rootCauseMessage(e)));
+        }
+    }
+
+    @PostMapping("/recompute/listing/{listingId}")
+    public ResponseEntity<?> recomputeOne(@PathVariable String listingId) {
+        Optional<Listing> listing = listingsService.findById(listingId);
+        if (listing.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+        try {
+            GapRecomputeService.RecomputeSummary summary = recomputeService.recomputeAndStore(List.of(listing.get()));
+            log.info("Recompute complete for {}: {} computed, {} with comps",
+                    listingId, summary.computed, summary.hasComps);
+            return ResponseEntity.ok(summary);
+        } catch (Exception e) {
+            log.error("Recompute failed: listingId={}", listingId, e);
             return ResponseEntity.internalServerError()
                     .body(Map.of("error", rootCauseMessage(e)));
         }

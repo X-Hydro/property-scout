@@ -153,17 +153,18 @@ public class NearbyCompsService {
         String targetStreet = ValueGapUtils.streetNameOnly(target.getAddress());
 
         String sql = """
-        SELECT property_id, address, city, property_type, assessed_value, acreage,
-               latitude, longitude,
-               ST_AsGeoJSON(geometry) AS geom_geojson,
-               ST_AsText(geometry) AS geom_wkt,
-               ST_Distance(geometry::geography, ST_GeomFromText(?, 4326)::geography) AS distance_m,
-               ST_DWithin(geometry::geography, ST_GeomFromText(?, 4326)::geography, ?) AS touches
-        FROM property_values
-        WHERE geometry IS NOT NULL
-          AND property_id <> ?
-          AND ST_DWithin(geometry::geography, ST_GeomFromText(?, 4326)::geography, ?)
-        """;
+    SELECT property_id, address, city, property_type, assessed_value, acreage,
+           latitude, longitude,
+           ST_AsGeoJSON(geometry) AS geom_geojson,
+           ST_AsText(geometry) AS geom_wkt,
+           ST_Area(geometry::geography) AS computed_area_sqm,
+           ST_Distance(geometry::geography, ST_GeomFromText(?, 4326)::geography) AS distance_m,
+           ST_DWithin(geometry::geography, ST_GeomFromText(?, 4326)::geography, ?) AS touches
+    FROM property_values
+    WHERE geometry IS NOT NULL
+      AND property_id <> ?
+      AND ST_DWithin(geometry::geography, ST_GeomFromText(?, 4326)::geography, ?)
+    """;
 
         List<CompCandidate> candidates = new ArrayList<>();
         String wkt = target.getGeometryWkt();
@@ -182,7 +183,10 @@ public class NearbyCompsService {
         jdbcTemplate.query(sql, rs -> {
             double distanceMeters = rs.getDouble("distance_m");
             boolean touches = rs.getBoolean("touches");
-            Double acres = (Double) rs.getObject("acreage");
+            Double storedAcres = (Double) rs.getObject("acreage");
+            double computedAcres = rs.getDouble("computed_area_sqm") / ParcelGeometryUtils.SQM_PER_ACRE;
+            double effectiveAcres = storedAcres != null ? storedAcres : computedAcres;
+
             String address = rs.getString("address");
             String rawPropertyType = rs.getString("property_type");
             PropertyType propertyType = PropertyType.fromValue(rawPropertyType);
@@ -227,7 +231,7 @@ public class NearbyCompsService {
                 foundVia.add("geometric");
             }
             if (distanceMeters <= closeRadiusM
-                    && ValueGapUtils.lotSizeSimilar(target.getAcres(), acres, lotSizeRatioTolerance)) {
+                    && ValueGapUtils.lotSizeSimilar(target.getAcres(), effectiveAcres, lotSizeRatioTolerance)) {
                 foundVia.add("near_similar_size");
             }
             if (distanceMeters <= farRadiusM
@@ -242,17 +246,8 @@ public class NearbyCompsService {
             if (address == null || address.isBlank()) {
                 return;
             }
-            // A true abutter (shares a boundary with the target, within
-            // TOUCH_TOLERANCE_M) still needs to pass a size-sanity check --
-            // touching only confirms "same immediate location," not "fair
-            // value comp" (e.g. a 0.135-acre postage-stamp lot touching a
-            // 1+ acre parcel is a different kind of property). But it
-            // shouldn't be held to the same tight ratio as a radius-only
-            // candidate, since an oversized/land target next to normal-sized
-            // built lots would otherwise lose its closest neighbors. Use a
-            // separate, looser tolerance instead of skipping the check.
             double effectiveRatioTolerance = touches ? touchingLotSizeRatioTolerance : lotSizeRatioTolerance;
-            if (!ValueGapUtils.lotSizeSimilar(target.getAcres(), acres, effectiveRatioTolerance)) {
+            if (!ValueGapUtils.lotSizeSimilar(target.getAcres(), effectiveAcres, effectiveRatioTolerance)) {
                 return;
             }
             if (rawPropertyType != null && !COMP_ELIGIBLE_TYPES.contains(propertyType)) {
@@ -266,7 +261,7 @@ public class NearbyCompsService {
                     rs.getString("city"),
                     propertyType,
                     (Double) rs.getObject("assessed_value"),
-                    acres,
+                    effectiveAcres,
                     distanceMeters,
                     rs.getDouble("latitude"),
                     rs.getDouble("longitude"),
