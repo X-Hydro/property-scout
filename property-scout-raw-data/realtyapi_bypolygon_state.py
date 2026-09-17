@@ -445,6 +445,9 @@ def main():
 
     suffix = "_foreclosures" if args.foreclosure else ""
     out_path = args.out or f"realtyapi_{args.state.lower()}{suffix}.json"
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)
 
