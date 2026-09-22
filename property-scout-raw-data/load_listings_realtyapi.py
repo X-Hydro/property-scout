@@ -277,12 +277,14 @@ def _listing_dict_from_raw(raw: dict) -> dict:
         "office": None,  # office is a plain string nested inside each advertiser, not a separate object -- see `agent`
         "price_history": None,  # NOT returned by /search/byzip
         "source": "RealtyAPI-Realtor",
+        "listing_url": raw.get("href"),
+        "primary_photo": raw.get("primary_photo"),
     }
     # Fields RealtyAPI returns that have no column in the current listings
     # schema, dropped here rather than guessed into an unrelated column:
-    # href (listing URL), primary_photo/photos, estimate (Realtor.com AVM),
-    # last_sold_price/last_sold_date, price_reduced_amount/date,
-    # flags.is_new_listing, source_type, has_specials, virtual_tours.
+    # estimate (Realtor.com AVM), last_sold_price/last_sold_date,
+    # price_reduced_amount/date, flags.is_new_listing, source_type,
+    # has_specials, virtual_tours.
     # Add columns first if you want to keep any of these.
 
 

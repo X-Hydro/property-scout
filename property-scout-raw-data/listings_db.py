@@ -28,6 +28,7 @@ COLUMNS = [
     "bathrooms", "square_footage", "lot_size", "year_built", "status", "price",
     "listing_type", "listed_date", "removed_date", "days_on_market",
     "mls_name", "mls_number", "agent", "office", "price_history", "source",
+    "listing_url", "primary_photo"
 ]
 
 UPSERT_SQL = f"""

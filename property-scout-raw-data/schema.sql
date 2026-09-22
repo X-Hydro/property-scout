@@ -68,6 +68,9 @@ CREATE TABLE IF NOT EXISTS listings (
 
     mls_name              TEXT,
     mls_number            TEXT,
+    
+    listing_url           TEXT,                     -- RealtyAPI's `href` -- link to the source listing page
+    primary_photo         TEXT,                     -- RealtyAPI's `primary_photo` -- single hero image URL
 
     agent                 JSONB,                    -- name/phone/email/website -- display-only, not queried
     office                JSONB,                    -- same
