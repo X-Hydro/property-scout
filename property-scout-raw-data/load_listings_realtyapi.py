@@ -76,6 +76,18 @@ Usage:
   python load_listings_realtyapi.py realtyapi-data/realtyapi_ma.json \
       --scope-state MA --scope-state-only --confirm-complete-fetch \
       --mark-removed --dsn "postgresql://..."
+
+  # Cheap DAILY run against a --days-on-market-filtered fetch (NEW,
+  # 2026-09-22) -- --max-listing-age-days MUST match the --days-on-market
+  # value used on the fetch side, or listings just outside that window get
+  # wrongly marked removed (see mark_removed_listings' docstring for the
+  # real bug this fixes). This only detects removal of listings younger
+  # than the window; still run a genuine full-state sweep (no
+  # --days-on-market, no --max-listing-age-days, see above) periodically
+  # to catch removals of older listings the daily runs can't see:
+  python load_listings_realtyapi.py nh_data_statewide/nh_listings_$DATA_DATE.json \
+      --scope-state NH --scope-state-only --confirm-complete-fetch \
+      --mark-removed --max-listing-age-days $DAYS_ON_MARKET --dsn "postgresql://..."
 """
 
 import sys
@@ -279,6 +291,7 @@ def _listing_dict_from_raw(raw: dict) -> dict:
         "source": "RealtyAPI-Realtor",
         "listing_url": raw.get("href"),
         "primary_photo": raw.get("primary_photo"),
+        "photos": json.dumps(raw.get("photos")) if raw.get("photos") is not None else None,
     }
     # Fields RealtyAPI returns that have no column in the current listings
     # schema, dropped here rather than guessed into an unrelated column:
@@ -344,7 +357,7 @@ def fetch_search_byzip(zip_code: str, api_key: str, property_type: str = "single
 
 def mark_removed_listings(conn, listing_ids: list[str], scope_city: str | None = None,
                            scope_state: str | None = None, scope_zip: str | None = None,
-                           scope_state_only: bool = False) -> int:
+                           scope_state_only: bool = False, max_age_days: int | None = None) -> int:
     """Marks any currently-non-Inactive RealtyAPI listing IN THE GIVEN SCOPE
     that is NOT in listing_ids as removed (status='Inactive', removed_date=today).
 
@@ -364,6 +377,23 @@ def mark_removed_listings(conn, listing_ids: list[str], scope_city: str | None =
     reason; this function itself does not re-verify fetch completeness --
     that verification (no dropped polygon parts, no silent pagination cap)
     has to happen before this is called.
+
+    max_age_days (NEW): CONFIRMED REAL BUG (2026-09-22) -- a fetch run with
+    realtyapi_bypolygon_state.py's --days-on-market filter only contains
+    listings younger than that window. Without max_age_days, this function
+    can't tell the difference between "genuinely gone" and "just outside the
+    fetch's age window" -- a real, still-active 5-day-old listing got wrongly
+    marked Inactive by a 2-day-filtered fetch this way. When max_age_days is
+    set, only listings with listed_date >= CURRENT_DATE - max_age_days are
+    eligible to be marked removed; anything older is left untouched, since
+    the fetch had no information about it either way (wouldn't appear
+    whether still active or genuinely gone). MUST match (or be <=) whatever
+    --days-on-market value the fetch itself used -- passing a looser value
+    here re-introduces the same bug for listings between the two windows.
+    Leave unset ONLY for a fetch that genuinely covers full current
+    inventory with no age filter (i.e. no --days-on-market on the fetch
+    side) -- same "manual acknowledgment, not verified" contract as
+    --confirm-complete-fetch.
 
     Marks rather than deletes: gap_results.listing_id has a plain FK to
     listings.listing_id with no ON DELETE clause, so a hard DELETE here would
@@ -387,16 +417,23 @@ def mark_removed_listings(conn, listing_ids: list[str], scope_city: str | None =
         raise ValueError("mark_removed_listings requires scope_zip, scope_state_only "
                           "(+ scope_state), or both scope_city and scope_state")
 
+    age_clause = ""
+    if max_age_days is not None:
+        age_clause = " AND listed_date >= CURRENT_DATE - %s::integer"
+
     query = f"""
         UPDATE listings
         SET status = 'Inactive', removed_date = CURRENT_DATE
         WHERE source = 'RealtyAPI-Realtor'
           AND {where_scope}
           AND status != 'Inactive'
-          AND listing_id != ALL(%s)
+          AND listing_id != ALL(%s){age_clause}
     """
+    params = scope_params + [listing_ids]
+    if max_age_days is not None:
+        params = params + [max_age_days]
     with conn.cursor() as cur:
-        cur.execute(query, scope_params + [listing_ids])
+        cur.execute(query, params)
         n = cur.rowcount
     conn.commit()
     return n
@@ -438,6 +475,16 @@ def main():
                               "dropped or capped (no missing polygon parts, no silent 10k-per-part "
                               "pagination cap -- see realtyapi_bypolygon_state.py's docstring). This "
                               "flag does not verify anything itself.")
+    parser.add_argument("--max-listing-age-days", type=int,
+                         help="Use with --mark-removed for a fetch that was itself filtered by "
+                              "realtyapi_bypolygon_state.py's --days-on-market (or similar). Restricts "
+                              "which listings --mark-removed is allowed to touch to ones with "
+                              "listed_date within this many days -- anything older is left alone, since "
+                              "an age-filtered fetch has no information about older listings either way "
+                              "(wouldn't appear whether still active or genuinely gone). MUST match (or "
+                              "be <=) the --days-on-market value the fetch actually used, or this still "
+                              "wrongly marks listings the fetch never had a chance to see. Omit only for "
+                              "a fetch with no age filter -- a genuinely complete current-inventory pull.")
     args = parser.parse_args()
 
     if args.mark_removed:
@@ -484,8 +531,10 @@ def main():
             print(f"Done. {n} listings upserted for zip {args.fetch_zip}.")
             if args.mark_removed:
                 ids = [l["listing_id"] for l in listings if l.get("listing_id")]
-                n_removed = mark_removed_listings(conn, ids, scope_zip=args.fetch_zip)
-                print(f"Marked {n_removed} listing(s) in zip {args.fetch_zip} as removed "
+                n_removed = mark_removed_listings(conn, ids, scope_zip=args.fetch_zip,
+                                                   max_age_days=args.max_listing_age_days)
+                age_note = f" younger than {args.max_listing_age_days}d" if args.max_listing_age_days else ""
+                print(f"Marked {n_removed} listing(s) in zip {args.fetch_zip}{age_note} as removed "
                       f"(not present in this fetch).")
         finally:
             conn.close()
@@ -520,7 +569,7 @@ def main():
             n_removed = mark_removed_listings(
                 conn, all_ids,
                 scope_city=args.scope_city, scope_state=args.scope_state, scope_zip=args.scope_zip,
-                scope_state_only=args.scope_state_only,
+                scope_state_only=args.scope_state_only, max_age_days=args.max_listing_age_days,
             )
             if args.scope_zip:
                 scope_label = args.scope_zip
@@ -528,7 +577,8 @@ def main():
                 scope_label = f"{args.scope_state} (state-wide)"
             else:
                 scope_label = f"{args.scope_city}, {args.scope_state}"
-            print(f"Marked {n_removed} listing(s) in {scope_label} as removed "
+            age_note = f" younger than {args.max_listing_age_days}d" if args.max_listing_age_days else ""
+            print(f"Marked {n_removed} listing(s) in {scope_label}{age_note} as removed "
                   f"(not present across the {len(paths)} file(s) loaded this run).")
     finally:
         conn.close()
