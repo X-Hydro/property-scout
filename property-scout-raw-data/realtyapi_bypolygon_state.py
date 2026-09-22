@@ -102,6 +102,15 @@ Usage:
     python realtyapi_bypolygon_state.py VT
     python realtyapi_bypolygon_state.py CA --property-type single_family,land --out ca_listings.json
     python realtyapi_bypolygon_state.py HI --max-parts 8   # override the default cap for a state you know needs it
+    python realtyapi_bypolygon_state.py VT --days-on-market 3   # only listings on the market <= 3 days
+
+--days-on-market N (alias --daysOnMarket) adds daysOnMarketMax=N to every
+request. Omitted by default, so a plain run still fetches everything.
+daysOnMarketMax is a documented optional parameter of /search/bypolygon,
+but its exact semantics on this endpoint are NOT yet verified in this
+project -- spot-check that returned listings' days-on-market / list date
+values are all <= N before trusting it (same lesson as the foreclosure
+filter: verify against known data before assuming a filter works).
 """
 
 import argparse
@@ -250,7 +259,8 @@ def _dedupe_key(result: dict, id_field: str | None) -> str:
 
 
 def dry_run_polygon(ring: list[list[float]], api_key: str, property_type: str | None,
-                     foreclosure: bool = False) -> tuple[int, int]:
+                     foreclosure: bool = False,
+                     days_on_market: int | None = None) -> tuple[int, int]:
     """Fetches ONLY page 1 (one request, not the full pagination) and
     reads the API's own "total" field to compute (total_listings,
     pages_needed) for this part. This is the entire cost model a dry
@@ -276,6 +286,8 @@ def dry_run_polygon(ring: list[list[float]], api_key: str, property_type: str | 
     # point before trusting a zero-result test as evidence of a bug.
     if foreclosure:
         params["foreclosure"] = "true"
+    if days_on_market is not None:
+        params["daysOnMarketMax"] = days_on_market
     data = _request_with_retries(headers, params)
     total = data.get("total", 0)
     pages = -(-total // RESULT_COUNT) if total else 0  # ceil division
@@ -283,7 +295,8 @@ def dry_run_polygon(ring: list[list[float]], api_key: str, property_type: str | 
 
 
 def search_polygon(ring: list[list[float]], api_key: str, property_type: str | None,
-                    part_label: str, foreclosure: bool = False) -> list[dict]:
+                    part_label: str, foreclosure: bool = False,
+                    days_on_market: int | None = None) -> list[dict]:
     headers = {"x-realtyapi-key": api_key}
     params = {
         "polygon": ring_to_polygon_param(ring),
@@ -296,6 +309,8 @@ def search_polygon(ring: list[list[float]], api_key: str, property_type: str | N
         params["propertyType"] = property_type
     if foreclosure:
         params["foreclosure"] = "true"
+    if days_on_market is not None:
+        params["daysOnMarketMax"] = days_on_market
     part_results = []
     last_known_total = None
     while True:
@@ -357,6 +372,11 @@ def main():
                          help="only return MLS-listed foreclosures (adds foreclosure=true). "
                               "CONFIRMED working on /search/bypolygon as of 2026-09-06 -- see "
                               "the comment in dry_run_polygon() for how that was verified")
+    parser.add_argument("--days-on-market", "--daysOnMarket", dest="days_on_market",
+                         type=int, default=None, metavar="N",
+                         help="only return listings on the market N days or fewer (adds "
+                              "daysOnMarketMax=N to every request), e.g. --days-on-market 3. "
+                              "Default: omitted entirely, so all listings are fetched")
     parser.add_argument("--max-parts", type=int, default=MAX_PARTS_DEFAULT,
                          help=f"max polygon parts to search per state, largest-area first "
                               f"(default {MAX_PARTS_DEFAULT}) -- see module docstring for the "
@@ -370,6 +390,12 @@ def main():
                               "requests total) to report total listings and total pages "
                               "needed, then exit -- does not write an output file")
     args = parser.parse_args()
+
+    if args.days_on_market is not None and args.days_on_market < 1:
+        parser.error("--days-on-market must be a positive whole number (>= 1)")
+    if args.days_on_market is not None:
+        print(f"Filtering to listings on the market <= {args.days_on_market} day(s) "
+              f"(daysOnMarketMax={args.days_on_market})")
 
     api_key = os.environ.get("REALTYAPI_KEY")
     if not api_key:
@@ -399,7 +425,8 @@ def main():
         for part_idx, ring in enumerate(rings):
             part_label = f"part {part_idx + 1}/{len(rings)}"
             try:
-                total, pages = dry_run_polygon(ring, api_key, args.property_type, args.foreclosure)
+                total, pages = dry_run_polygon(ring, api_key, args.property_type, args.foreclosure,
+                                               args.days_on_market)
             except ScriptError as e:
                 print(f"FAILED on {part_label}: {e}", file=sys.stderr)
                 sys.exit(1)
@@ -419,7 +446,8 @@ def main():
     for part_idx, ring in enumerate(rings):
         part_label = f"part {part_idx + 1}/{len(rings)}"
         try:
-            part_results = search_polygon(ring, api_key, args.property_type, part_label, args.foreclosure)
+            part_results = search_polygon(ring, api_key, args.property_type, part_label,
+                                          args.foreclosure, args.days_on_market)
         except ScriptError as e:
             print(f"FAILED on {part_label}: {e}", file=sys.stderr)
             sys.exit(1)
@@ -444,6 +472,9 @@ def main():
             all_results.append(result)
 
     suffix = "_foreclosures" if args.foreclosure else ""
+    if args.days_on_market is not None:
+        # keeps a partial "recent listings" pull from overwriting a full pull
+        suffix += f"_last{args.days_on_market}d"
     out_path = args.out or f"realtyapi_{args.state.lower()}{suffix}.json"
     out_dir = os.path.dirname(out_path)
     if out_dir:
