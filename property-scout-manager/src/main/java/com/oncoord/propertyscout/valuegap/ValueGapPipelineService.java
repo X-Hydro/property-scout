@@ -75,7 +75,8 @@ public class ValueGapPipelineService {
                 listing.getLatitude(),
                 listing.getLongitude(),
                 targetGeometry,
-                candidates
+                candidates,
+                listing.getListingUrl()
         );
 
         return Optional.of(result);

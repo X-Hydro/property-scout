@@ -70,6 +70,9 @@ public class ListingRowMapper implements RowMapper<Listing> {
                 rs.getObject("fetched_at", java.time.OffsetDateTime.class)
         );
 
+        listing.setListingUrl(rs.getString("listing_url"));
+        listing.setPrimaryPhoto(rs.getString("primary_photo"));
+
         return listing;
     }
 

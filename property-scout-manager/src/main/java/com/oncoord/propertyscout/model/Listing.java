@@ -44,6 +44,9 @@ public class Listing {
     private String source;
     private OffsetDateTime fetchedAt;
 
+    private String listingUrl;
+    private String primaryPhoto;
+
     public String getListingId() {
         return listingId;
     }
@@ -276,6 +279,22 @@ public class Listing {
         this.fetchedAt = fetchedAt;
     }
 
+    public String getListingUrl() {
+        return listingUrl;
+    }
+
+    public void setListingUrl(String listingUrl) {
+        this.listingUrl = listingUrl;
+    }
+
+    public String getPrimaryPhoto() {
+        return primaryPhoto;
+    }
+
+    public void setPrimaryPhoto(String primaryPhoto) {
+        this.primaryPhoto = primaryPhoto;
+    }
+
 
     @Override
     public String toString() {
@@ -309,6 +328,8 @@ public class Listing {
                 ", priceHistory=" + priceHistory +
                 ", source='" + source + '\'' +
                 ", fetchedAt=" + fetchedAt +
+                ", listingUrl='" + listingUrl + '\'' +
+                ", primaryPhoto='" + primaryPhoto + '\'' +
                 '}';
     }
 }

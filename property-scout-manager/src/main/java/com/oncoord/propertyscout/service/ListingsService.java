@@ -51,7 +51,9 @@ public class ListingsService {
                 office,
                 price_history,
                 source,
-                fetched_at
+                fetched_at,
+                listing_url,
+                primary_photo
             FROM listings
             """;
 
@@ -61,13 +63,15 @@ public class ListingsService {
                 city, state, zip_code, county, latitude, longitude,
                 property_type, bedrooms, bathrooms, square_footage, lot_size, year_built,
                 status, price, listing_type, listed_date, removed_date, days_on_market,
-                mls_name, mls_number, agent, office, price_history, source, fetched_at
+                mls_name, mls_number, agent, office, price_history, source, fetched_at,
+                listing_url, primary_photo
             ) VALUES (
                 ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?,
-                ?, ?, ?::jsonb, ?::jsonb, ?::jsonb, ?, ?
+                ?, ?, ?::jsonb, ?::jsonb, ?::jsonb, ?, ?,
+                ?, ?
             )
             ON CONFLICT (listing_id) DO UPDATE SET
                 formatted_address = EXCLUDED.formatted_address,
@@ -97,7 +101,9 @@ public class ListingsService {
                 office = EXCLUDED.office,
                 price_history = EXCLUDED.price_history,
                 source = EXCLUDED.source,
-                fetched_at = EXCLUDED.fetched_at
+                fetched_at = EXCLUDED.fetched_at,
+                listing_url = EXCLUDED.listing_url,
+                primary_photo = EXCLUDED.primary_photo
             """;
 
     public ListingsService(
@@ -220,7 +226,9 @@ public class ListingsService {
                     toJsonText(l.getOffice()),
                     toJsonText(l.getPriceHistory()),
                     l.getSource(),
-                    l.getFetchedAt()
+                    l.getFetchedAt(),
+                    l.getListingUrl(),
+                    l.getPrimaryPhoto()
             );
         }
         return listings.size();

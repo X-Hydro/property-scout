@@ -12,6 +12,7 @@ public class GapResult {
     private final Double targetAssessedValue;
     private final boolean targetIsLand;
     private final List<CompCandidate> candidates;
+    private final String listingUrl;
 
     private final boolean hasComps;
     private final List<CompCandidate> comps;
@@ -34,7 +35,8 @@ public class GapResult {
             Double targetLatitude, Double targetLongitude, com.fasterxml.jackson.databind.JsonNode targetGeometry,
             boolean targetIsLand,
             List<CompCandidate> candidates, boolean hasComps, List<CompCandidate> comps,
-            Double compMedian, Double compMin, Double compMax, Double gap, Double gapPct) {
+            Double compMedian, Double compMin, Double compMax, Double gap, Double gapPct,
+            String listingUrl) {
         this.listingId = listingId;
         this.address = address;
         this.propertyType = propertyType;
@@ -53,6 +55,7 @@ public class GapResult {
         this.compMax = compMax;
         this.gap = gap;
         this.gapPct = gapPct;
+        this.listingUrl = listingUrl;
     }
 
     public Double getTargetLatitude() { return targetLatitude; }
@@ -117,6 +120,10 @@ public class GapResult {
 
     public Double getGapPct() {
         return gapPct;
+    }
+
+    public String getListingUrl() {
+        return listingUrl;
     }
 
     public Double getRelativeGapPct() {
