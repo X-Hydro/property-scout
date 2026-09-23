@@ -98,9 +98,10 @@ FALLBACK_MAX_DISTANCE_DEG = 0.0005  # roughly 40-55m, varies by latitude -- appr
 # number gap analysis is actually comparing listings against), not a
 # per-run convenience setting, so flipping it means editing this constant,
 # not something that can be changed accidentally via an unnoticed flag.
-# To prefer zestimate instead, reverse the order:
-#   VALUE_PRIORITY = ["zestimate", "tax_assessed_value"]
-VALUE_PRIORITY = ["tax_assessed_value", "zestimate"]
+#Use the zestimate over the taxAssessedValue in in the offmarket json
+VALUE_PRIORITY = ["zestimate", "tax_assessed_value"] 
+#Use the taxAssessedValue over the zestimate in the offmarket json
+#VALUE_PRIORITY = ["tax_assessed_value", "zestimate"]
 
 # See module docstring's point 3 -- DEFAULT FALSE. Confirmed via a real
 # production case: this fallback was found silently attributing a nearby
