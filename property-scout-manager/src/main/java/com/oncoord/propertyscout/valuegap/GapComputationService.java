@@ -5,6 +5,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -27,6 +28,16 @@ public class GapComputationService {
     // count toward the median a listing (house or land) is measured against.
     private static final PropertyType VALUE_COMP_TYPE = PropertyType.SINGLE_FAMILY;
 
+    // Cap on how many eligible comps feed the median. Once a neighborhood
+    // has more than this many SINGLE_FAMILY-eligible candidates, the
+    // farthest ones are dropped from the VALUE calculation (median/min/max/
+    // gap) -- distant comps in a dense area can otherwise pull the median
+    // toward a different part of the neighborhood than the target actually
+    // sits in. This does NOT affect `candidates` (the full found-nearby
+    // list still shown on the map) or CompCandidate.compEligible -- only
+    // which of the eligible comps actually participate in the value math.
+    private static final int MAX_VALUE_COMPS = 15;
+
     public GapResult compute(
             String listingId,
             String address,
@@ -46,6 +57,11 @@ public class GapComputationService {
             if (c.getPropertyType() == VALUE_COMP_TYPE && c.getAssessedValue() != null) {
                 comps.add(c);
             }
+        }
+
+        if (comps.size() > MAX_VALUE_COMPS) {
+            comps.sort(Comparator.comparingDouble(CompCandidate::getDistanceMeters));
+            comps = new ArrayList<>(comps.subList(0, MAX_VALUE_COMPS));
         }
 
         if (comps.isEmpty()) {
