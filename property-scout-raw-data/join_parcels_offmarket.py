@@ -204,6 +204,13 @@ def load_offmarket_points(offmarket_dir: str, zip_codes: list[str] | None = None
                 "tax_assessment_year": tax.get("taxAssessmentYear"),
                 "list_or_last_price": price.get("value"),
                 "acres": acres,
+                "building_sqft": rec.get("livingArea"),  # feeds property_values.building_sqft directly --
+                                                            # GRANIT parcel records carry no building-level
+                                                            # detail (sqft/bed/bath are VGSI-building-card-only
+                                                            # data), so an offmarket-sourced parcel has nothing
+                                                            # authoritative to clobber here, unlike city/year_built
+                "bedrooms": rec.get("bedrooms"),           # same reasoning as building_sqft above
+                "bathrooms": rec.get("bathrooms"),         # same reasoning as building_sqft above
                 "property_type": rec.get("propertyType"),  # raw value passed through as-is -- what a state's
                                                               # spider does with it (e.g. RI's Vacant Land
                                                               # inference in ri_spider.py) is that state's own
@@ -305,6 +312,9 @@ def join_town_file(parcels_path: str, tree: STRtree, points: list[dict], out_pat
             props["offmarket_zip"] = None
             props["offmarket_property_type"] = None
             props["offmarket_year_built"] = None
+            props["building_sqft"] = None
+            props["bedrooms"] = None
+            props["bathrooms"] = None
         else:
             # See VALUE_PRIORITY at module level -- tax_assessed_value
             # preferred (parity with VGSI's real assessment semantics),
@@ -323,6 +333,9 @@ def join_town_file(parcels_path: str, tree: STRtree, points: list[dict], out_pat
             props["offmarket_zip"] = match.get("zip")
             props["offmarket_property_type"] = match.get("property_type")
             props["offmarket_year_built"] = match.get("year_built")
+            props["building_sqft"] = match.get("building_sqft")
+            props["bedrooms"] = match.get("bedrooms")
+            props["bathrooms"] = match.get("bathrooms")
 
             if method == "point_in_polygon":
                 matched_strict += 1
