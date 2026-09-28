@@ -47,11 +47,27 @@ COLUMNS = [
     "source", "source_url", "source_date",
 ]
 
+# Columns where a NULL in the incoming file must NOT overwrite a real value
+# already in the table. These come from the offmarket join, which only fills
+# them for parcels that matched a listing in THAT run -- a partial cache, a
+# smaller sweep, or a parcel with no match this time would otherwise wipe
+# good data with NULL. A non-NULL incoming value still updates normally.
+# Tradeoff: a value can never be cleared back to NULL by a reload (delete
+# it in SQL if that's ever actually intended).
+PRESERVE_IF_NULL = {"building_sqft", "bedrooms", "bathrooms"}
+
+
+def _set_clause(c: str) -> str:
+    if c in PRESERVE_IF_NULL:
+        return f"{c} = COALESCE(EXCLUDED.{c}, property_values.{c})"
+    return f"{c} = EXCLUDED.{c}"
+
+
 UPSERT_SQL = f"""
 INSERT INTO property_values (property_id, {", ".join(COLUMNS)}, geometry)
 VALUES %s
 ON CONFLICT (property_id) DO UPDATE SET
-    {", ".join(f"{c} = EXCLUDED.{c}" for c in COLUMNS)},
+    {", ".join(_set_clause(c) for c in COLUMNS)},
     geometry = EXCLUDED.geometry,
     loaded_at = now()
 """
