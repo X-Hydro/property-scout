@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS gap_results (
     gap                   NUMERIC,
     gap_pct               NUMERIC,
     relative_gap_pct      NUMERIC,
+    comp_median_price_per_sqft NUMERIC,
     computed_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
  

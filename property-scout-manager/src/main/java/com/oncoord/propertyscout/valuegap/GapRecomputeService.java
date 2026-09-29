@@ -37,6 +37,9 @@ public class GapRecomputeService {
 
     private static final List<String> DEFAULT_STATUSES = List.of("Active");
 
+    // comp_median_price_per_sqft is reset to NULL here and refilled by
+    // COMP_PPSF_SQL right after, so a listing whose new comps no longer
+    // qualify doesn't keep a stale value.
     private static final String UPSERT_SQL = """
             INSERT INTO gap_results
                 (listing_id, has_comps, target_assessed_value, comp_median, comp_min, comp_max,
@@ -53,7 +56,28 @@ public class GapRecomputeService {
                 gap = EXCLUDED.gap,
                 gap_pct = EXCLUDED.gap_pct,
                 relative_gap_pct = EXCLUDED.relative_gap_pct,
+                comp_median_price_per_sqft = NULL,
                 computed_at = EXCLUDED.computed_at
+            """;
+
+    // Median assessed $/sqft of each listing's stored comps: plausible sqft
+    // only (400-20000), and at least 3 such comps, otherwise left NULL.
+    private static final String COMP_PPSF_SQL = """
+            UPDATE gap_results g
+            SET comp_median_price_per_sqft = s.ppsf
+            FROM (
+                SELECT g2.listing_id,
+                       percentile_cont(0.5) WITHIN GROUP
+                           (ORDER BY pv.assessed_value / pv.building_sqft) AS ppsf
+                FROM gap_results g2
+                CROSS JOIN LATERAL unnest(g2.comp_property_ids) AS c(property_id)
+                JOIN property_values pv ON pv.property_id = c.property_id
+                WHERE pv.assessed_value IS NOT NULL
+                  AND pv.building_sqft BETWEEN 400 AND 20000
+                GROUP BY g2.listing_id
+                HAVING count(*) >= 3
+            ) s
+            WHERE g.listing_id = s.listing_id
             """;
 
     public GapRecomputeService(ValueGapPipelineService pipelineService, GapRankingService gapRankingService,
@@ -102,6 +126,7 @@ public class GapRecomputeService {
 
         int hasCompsCount = (int) results.stream().filter(GapResult::isHasComps).count();
         persistResults(results);
+        updateCompPricePerSqft();
 
         return new RecomputeSummary(listings.size(), results.size(), hasCompsCount);
     }
@@ -137,6 +162,17 @@ public class GapRecomputeService {
         });
     }
 
+    /**
+     * Fills gap_results.comp_median_price_per_sqft for every row in one
+     * set-based UPDATE -- done here at recompute time so GET /rank stays a
+     * plain column read. Reflects property_values as of this recompute; a
+     * later sqft backfill needs another recompute to show up.
+     */
+    private void updateCompPricePerSqft() {
+        int updated = jdbcTemplate.update(COMP_PPSF_SQL);
+        log.info("Comp $/sqft set for {} gap_results rows", updated);
+    }
+
     private static java.sql.Array toSqlArray(Connection con, List<String> ids) throws java.sql.SQLException {
         if (ids == null || ids.isEmpty()) {
             return null;
@@ -155,39 +191,11 @@ public class GapRecomputeService {
 
         String sql = ("""
                 SELECT l.listing_id, l.formatted_address AS address, l.property_type,
-                       l.year_built, l.price, l.status, g.target_assessed_value, g.comp_median,
-                       g.comp_min, g.comp_max, g.comp_count, g.gap, g.gap_pct, g.relative_gap_pct,
-                       l.square_footage AS target_sqft,
-                       s.sqft_comp_count,
-                       s.comp_median_price_per_sqft,
-                       s.comp_median_price_per_sqft * l.square_footage AS sqft_adjusted_comp_value,
-                       s.comp_median_price_per_sqft * l.square_footage - l.price AS sqft_adjusted_gap,
-                       (s.comp_median_price_per_sqft * l.square_footage - l.price)
-                           / NULLIF(l.price, 0) * 100.0 AS sqft_adjusted_gap_pct
+                       l.year_built, l.price, l.status, l.square_footage AS target_sqft,
+                       g.target_assessed_value, g.comp_median, g.comp_min, g.comp_max,
+                       g.comp_count, g.gap, g.gap_pct, g.comp_median_price_per_sqft
                 FROM gap_results g
                 JOIN listings l ON l.listing_id = g.listing_id
-                -- Square-footage-adjusted comparison, computed at read time from the comps
-                -- gap_results already recorded (comp_property_ids) -- nothing extra is stored,
-                -- and it reflects property_values' CURRENT building_sqft, so a sqft backfill
-                -- shows up without a recompute. Mirrors GapComputationService.applySqftAdjustment:
-                -- median $/sqft of comps with plausible sqft (400-20000), scaled by the listing's
-                -- own square_footage; NULL (never a fallback) when the listing is Land, has no
-                -- plausible sqft, or fewer than 3 comps have usable sqft. Keep the 400 / 20000 / 3
-                -- constants in sync with that class. percentile_cont(0.5) averages the two middle
-                -- values on an even count, same as the Java median.
-                LEFT JOIN LATERAL (
-                    SELECT count(*) AS sqft_comp_count,
-                           percentile_cont(0.5) WITHIN GROUP
-                               (ORDER BY pv.assessed_value / pv.building_sqft) AS comp_median_price_per_sqft
-                    FROM property_values pv
-                    WHERE pv.property_id = ANY(g.comp_property_ids)
-                      AND pv.assessed_value IS NOT NULL
-                      AND pv.building_sqft BETWEEN 400 AND 20000
-                      AND l.square_footage BETWEEN 400 AND 20000
-                      AND l.price > 0
-                      AND l.property_type IS DISTINCT FROM 'Land'
-                    HAVING count(*) >= 3
-                ) s ON true
                 WHERE l.state = ?
                   AND (?::text IS NULL OR l.city = ?)
                   AND (?::text IS NULL OR l.zip_code = ?)
@@ -195,19 +203,12 @@ public class GapRecomputeService {
                   AND (?::numeric IS NULL OR l.price <= ?)
                   AND l.status IN (%s)
                   AND g.has_comps = true
-                  -- Under 3 comps is too thin to rank: one outlier comp (a full-size house
-                  -- next to a trailer, say) produced gaps in the thousands of percent that
-                  -- then sat at the very top of the list.
+                  -- Fewer than 3 comps is too thin to rank: one outlier comp produced
+                  -- gaps in the thousands of percent at the top of the list.
                   AND g.comp_count >= 3
-                -- Listings WITH a sqft-adjusted gap come first (largest adjusted gap percent
-                -- first), then listings without one by raw gap. The browser sorts the same
-                -- way, and the statewide top-N cut happens on THIS order, so the two must
-                -- stay identical.
-                ORDER BY l.property_type,
-                         (s.comp_median_price_per_sqft IS NULL),
-                         ((s.comp_median_price_per_sqft * l.square_footage - l.price)
-                             / NULLIF(l.price, 0)) DESC NULLS LAST,
-                         g.gap DESC NULLS LAST
+                -- Must match compareListings() in property-scout.js: the statewide
+                -- top-N cut happens on this order.
+                ORDER BY l.property_type, g.gap DESC NULLS LAST
                 """).formatted(statusPlaceholders);
 
         List<Object> args = new ArrayList<>();
