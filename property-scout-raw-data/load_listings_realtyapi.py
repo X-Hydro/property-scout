@@ -205,6 +205,19 @@ def _to_float(val):
         return None
 
 
+def _to_int(val):
+    """Same defensive shape as _to_float() -- year_built is an INTEGER
+    column; coercing here avoids handing psycopg2 a raw Python float
+    (RealtyAPI's fix could plausibly return 2000 or 2000.0 depending on
+    their JSON serialization -- int(float(val)) handles either)."""
+    if val is None or val == "":
+        return None
+    try:
+        return int(float(val))
+    except (TypeError, ValueError):
+        return None
+
+
 def _extract_records(payload) -> list[dict]:
     if isinstance(payload, list):
         return payload
@@ -276,7 +289,7 @@ def _listing_dict_from_raw(raw: dict) -> dict:
         "bathrooms": _to_float(raw.get("baths")),
         "square_footage": raw.get("sqft"),
         "lot_size": raw.get("lot_sqft"),  # NOTE: confirm units (sqft) match property_values.acreage before comparing -- see listings_schema.sql
-        "year_built": None,  # NOT returned by /search/byzip -- only available via /details/byid (1 credit/call extra)
+        "year_built": _to_int(raw.get("year_built")),
         "status": final_status,
         "price": raw.get("list_price"),
         "listing_type": _listing_type_from_flags(flags),
