@@ -184,11 +184,11 @@ public class Listing {
     }
 
     public Double getPrice() {
-        return price;
+        return (price == null || price < 0) ? 0.0 : price;
     }
 
     public void setPrice(Double price) {
-        this.price = price;
+        this.price = (price == null || price < 0) ? 0.0 : price;
     }
 
     public String getListingType() {

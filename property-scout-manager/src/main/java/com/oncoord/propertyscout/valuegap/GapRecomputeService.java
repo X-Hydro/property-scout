@@ -117,7 +117,7 @@ public class GapRecomputeService {
             }
             processed++;
             if (processed % 1000 == 0 || processed == total) {
-                log.info("Processed {} of {} records ({} failed)", processed, total, failed);
+                log.info("'{}': Processed {} of {} records ({} failed)", listing.getState(), processed, total, failed);
             }
         }
         log.info("Processed {} of {} records ({} failed)", processed, total, failed);
