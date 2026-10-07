@@ -76,10 +76,12 @@ public class ValueGapController {
             @RequestParam(required = false) String propertyType,
             @RequestParam(required = false) Double maxPrice,
             @RequestParam(required = false) Integer limit,
-            @RequestParam(required = false) List<String> statuses) {
+            @RequestParam(required = false) List<String> statuses,
+            @RequestParam(required = false) Integer listedWithinDays) {
 
         try {
-            return ResponseEntity.ok(recomputeService.findRanked(state, city, zipCode, propertyType, maxPrice, limit, statuses));
+            return ResponseEntity.ok(recomputeService.findRanked(state, city, zipCode, propertyType,
+                    maxPrice, limit, statuses, listedWithinDays));
         } catch (Exception e) {
             log.error("Rank query failed: state={} city={}", state, city, e);
             return ResponseEntity.internalServerError()

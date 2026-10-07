@@ -181,7 +181,8 @@ public class GapRecomputeService {
     }
 
     public Map<String, Object> findRanked(String state, String city, String zipCode,
-                                          String propertyType, Double maxPrice, Integer limit, List<String> statuses) {
+                                          String propertyType, Double maxPrice, Integer limit,
+                                          List<String> statuses, Integer listedWithinDays) {
         List<String> effectiveStatuses = (statuses == null || statuses.isEmpty())
                 ? DEFAULT_STATUSES
                 : statuses;
@@ -192,6 +193,7 @@ public class GapRecomputeService {
         String sql = ("""
                 SELECT l.listing_id, l.formatted_address AS address, l.property_type,
                        l.year_built, l.price, l.status, l.square_footage AS target_sqft,
+                       l.listed_date,
                        g.target_assessed_value, g.comp_median, g.comp_min, g.comp_max,
                        g.comp_count, g.gap, g.gap_pct, g.comp_median_price_per_sqft
                 FROM gap_results g
@@ -201,6 +203,7 @@ public class GapRecomputeService {
                   AND (?::text IS NULL OR l.zip_code = ?)
                   AND (?::text IS NULL OR l.property_type = ?)
                   AND (?::numeric IS NULL OR l.price <= ?)
+                  AND (?::int IS NULL OR l.listed_date > CURRENT_DATE - ?::int)
                   AND l.status IN (%s)
                   AND g.has_comps = true
                   -- Fewer than 3 comps is too thin to rank: one outlier comp produced
@@ -221,8 +224,9 @@ public class GapRecomputeService {
         args.add(propertyType);
         args.add(maxPrice);
         args.add(maxPrice);
+        args.add(listedWithinDays);
+        args.add(listedWithinDays);
         args.addAll(effectiveStatuses);
-
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, args.toArray());
 
         Map<String, List<Map<String, Object>>> byType = new LinkedHashMap<>();
