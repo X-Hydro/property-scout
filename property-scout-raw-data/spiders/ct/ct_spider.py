@@ -226,6 +226,7 @@ class CTSpider(StateSpider):
             "returnGeometry": "true",
             "resultOffset": str(offset),
             "resultRecordCount": str(PAGE_SIZE),
+            "orderByFields": "OBJECTID",
             "f": "geojson",  # confirmed supported at the layer level
         }
         url = f"{BASE_QUERY_URL}?{urllib.parse.urlencode(params)}"
@@ -244,29 +245,25 @@ class CTSpider(StateSpider):
                 f"ArcGIS query error at offset={offset}: {data['error']}"
             )
         return data
-
+        
     def _normalize_feature(self, feature: dict, town: str) -> dict:
-        # f=geojson response shape: feature["properties"] + feature["geometry"]
-        # already real GeoJSON -- NOT feature["attributes"] (that was the
-        # f=json/Esri-JSON shape from before the f=geojson fix).
         attrs = feature.get("properties", {})
         geometry = feature.get("geometry")
         lat, lon = _geojson_centroid(geometry)
 
-        # All field names below are CONFIRMED from a real live run's
-        # diagnostic field list -- no more guesses. See module docstring
-        # for the two corrections vs. earlier guesses.
         parcel_id = attrs.get("Parcel_ID")
+        objectid = attrs.get("OBJECTID")
+        town_key = (attrs.get("Town_Name") or town).upper().replace(" ", "_")
         record = {
-            "property_id": f"CT:{parcel_id}" if parcel_id else None,
-            "_objectid": attrs.get("OBJECTID"),  # internal use only -- for de-duping, stripped before output
+            "property_id": f"CT:{town_key}:{parcel_id}" if parcel_id else f"CT:NOID#OBJECTID{objectid}",
+            "_objectid": objectid,
             "state": "CT",
-            "county": None,  # Planning_Region is available but not the same concept -- see docstring
+            "county": None,
             "municipality": attrs.get("Town_Name") or town,
             "parcel_id": parcel_id,
             "address": attrs.get("Location_1"),
             "city": attrs.get("Property_City") or attrs.get("Town_Name") or town,
-            "zip": None,  # confirmed NOT in this live schema, despite CT's catalog note -- see docstring
+            "zip": None,
             "latitude": lat,
             "longitude": lon,
             "acreage": _num(attrs, "Land_Acres"),
@@ -279,7 +276,7 @@ class CTSpider(StateSpider):
             "building_sqft": _num(attrs, "Living_Area"),
             "bedrooms": _num(attrs, "Number_of_Bedroom"),
             "bathrooms": _combined_bathrooms(attrs),
-            "year_built": _num(attrs, "ayb"),  # "actual year built" -- standard CAMA abbreviation
+            "year_built": _num(attrs, "ayb"),
             "property_type": standardize_property_type(attrs.get("State_Use_Description")),
             "source": SOURCE_TAG,
             "source_url": BASE_QUERY_URL,
@@ -287,6 +284,7 @@ class CTSpider(StateSpider):
             "_geometry": geometry,
         }
         return record
+    
 
     def fetch_town(self, town: str) -> list[dict]:
         records = []
