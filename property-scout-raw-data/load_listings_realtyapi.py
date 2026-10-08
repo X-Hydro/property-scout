@@ -88,6 +88,8 @@ Usage:
   python load_listings_realtyapi.py nh_data_statewide/nh_listings_$DATA_DATE.json \
       --scope-state NH --scope-state-only --confirm-complete-fetch \
       --mark-removed --max-listing-age-days $DAYS_ON_MARKET --dsn "postgresql://..."
+
+  python load_listings_realtyapi.py ri_data_statewide/ri_listings_$DATA_DATE.json --dsn "postgresql://..."
 """
 
 import sys
@@ -370,7 +372,9 @@ def fetch_search_byzip(zip_code: str, api_key: str, property_type: str = "single
 
 def mark_removed_listings(conn, listing_ids: list[str], scope_city: str | None = None,
                            scope_state: str | None = None, scope_zip: str | None = None,
-                           scope_state_only: bool = False, max_age_days: int | None = None) -> int:
+                           scope_state_only: bool = False, max_age_days: int | None = None,
+                           property_types: list[str] | None = None,
+                           age_reference_date: str | None = None) -> int:
     """Marks any currently-non-Inactive RealtyAPI listing IN THE GIVEN SCOPE
     that is NOT in listing_ids as removed (status='Inactive', removed_date=today).
 
@@ -416,6 +420,15 @@ def mark_removed_listings(conn, listing_ids: list[str], scope_city: str | None =
     listing_ids should be the FULL set from every page of the current run --
     passing only page 1 of a multi-page fetch would wrongly mark real,
     still-active listings from later pages as removed.
+
+    property_types (NEW, 2026-10): listings-table property_type values
+    (e.g. ["Single Family", "Land"]) the fetch covered. When set, only those
+    types are eligible -- a single_family,land fetch says nothing about
+    condos. None means the fetch covered all types.
+
+    age_reference_date (NEW, 2026-10): ISO date the max_age_days window is
+    measured from -- the FETCH date, so loading a day late doesn't shift the
+    window. Defaults to CURRENT_DATE.
     """
     if scope_zip:
         where_scope = "zip_code = %s"
@@ -430,9 +443,14 @@ def mark_removed_listings(conn, listing_ids: list[str], scope_city: str | None =
         raise ValueError("mark_removed_listings requires scope_zip, scope_state_only "
                           "(+ scope_state), or both scope_city and scope_state")
 
-    age_clause = ""
+    extra_clauses = ""
+    params = scope_params + [listing_ids]
     if max_age_days is not None:
-        age_clause = " AND listed_date >= CURRENT_DATE - %s::integer"
+        extra_clauses += " AND listed_date >= COALESCE(%s::date, CURRENT_DATE) - %s::integer"
+        params += [age_reference_date, max_age_days]
+    if property_types:
+        extra_clauses += " AND property_type = ANY(%s)"
+        params += [list(property_types)]
 
     query = f"""
         UPDATE listings
@@ -440,16 +458,53 @@ def mark_removed_listings(conn, listing_ids: list[str], scope_city: str | None =
         WHERE source = 'RealtyAPI-Realtor'
           AND {where_scope}
           AND status != 'Inactive'
-          AND listing_id != ALL(%s){age_clause}
+          AND listing_id != ALL(%s){extra_clauses}
     """
-    params = scope_params + [listing_ids]
-    if max_age_days is not None:
-        params = params + [max_age_days]
     with conn.cursor() as cur:
         cur.execute(query, params)
         n = cur.rowcount
     conn.commit()
     return n
+
+
+def read_fetch_meta(path: str) -> dict | None:
+    meta_path = Path(path + ".meta")
+    if not meta_path.is_file():
+        return None
+    with open(meta_path) as f:
+        return json.load(f)
+
+
+def auto_mark_plan(paths: list[str]) -> tuple[dict | None, str | None]:
+    """Decides auto mark-removed from the .meta sidecars of every file in
+    this run. Returns (plan, None) when safe, or (None, reason) to skip."""
+    metas = []
+    for p in paths:
+        m = read_fetch_meta(p)
+        if m is None:
+            return None, f"{p} has no .meta sidecar (not from realtyapi_bypolygon_state.py, or an older run)"
+        metas.append(m)
+
+    def key(m):
+        return (m.get("state"), m.get("days_on_market"),
+                tuple(m.get("property_types") or []), m.get("fetch_date"))
+    if any(key(m) != key(metas[0]) for m in metas[1:]):
+        return None, "files come from fetches with different state/window/property types/dates"
+
+    incomplete = [r for m in metas if not m.get("complete") for r in (m.get("incomplete_reasons") or ["incomplete"])]
+    if incomplete:
+        return None, "fetch was incomplete: " + "; ".join(incomplete)
+
+    first = metas[0]
+    dom = first.get("days_on_market")
+    types = first.get("property_types")
+    return {
+        "state": first["state"],
+        "days_on_market": dom,
+        "max_age_days": None if dom is None else max(dom - 1, 0),
+        "age_reference_date": first.get("fetch_date"),
+        "property_types": [PROPERTY_TYPE_MAP.get(t, t) for t in types] if types else None,
+    }, None
 
 
 def main():
@@ -498,7 +553,19 @@ def main():
                               "be <=) the --days-on-market value the fetch actually used, or this still "
                               "wrongly marks listings the fetch never had a chance to see. Omit only for "
                               "a fetch with no age filter -- a genuinely complete current-inventory pull.")
+    parser.add_argument("--scope-property-types",
+                         help="Manual --mark-removed only: comma list of the RealtyAPI property types the "
+                              "fetch covered (e.g. single_family,land) -- restricts marking to those "
+                              "types. Auto mode takes this from the .meta sidecar instead.")
+    parser.add_argument("--no-auto-mark-removed", action="store_true",
+                         help="Disable automatic mark-removed driven by realtyapi_bypolygon_state.py's "
+                              ".meta sidecar.")
     args = parser.parse_args()
+
+    manual_property_types = None
+    if args.scope_property_types:
+        manual_property_types = [PROPERTY_TYPE_MAP.get(t.strip(), t.strip())
+                                 for t in args.scope_property_types.split(",") if t.strip()]
 
     if args.mark_removed:
         has_zip_scope = bool(args.scope_zip)
@@ -545,7 +612,8 @@ def main():
             if args.mark_removed:
                 ids = [l["listing_id"] for l in listings if l.get("listing_id")]
                 n_removed = mark_removed_listings(conn, ids, scope_zip=args.fetch_zip,
-                                                   max_age_days=args.max_listing_age_days)
+                                                   max_age_days=args.max_listing_age_days,
+                                                   property_types=manual_property_types)
                 age_note = f" younger than {args.max_listing_age_days}d" if args.max_listing_age_days else ""
                 print(f"Marked {n_removed} listing(s) in zip {args.fetch_zip}{age_note} as removed "
                       f"(not present in this fetch).")
@@ -583,6 +651,7 @@ def main():
                 conn, all_ids,
                 scope_city=args.scope_city, scope_state=args.scope_state, scope_zip=args.scope_zip,
                 scope_state_only=args.scope_state_only, max_age_days=args.max_listing_age_days,
+                property_types=manual_property_types,
             )
             if args.scope_zip:
                 scope_label = args.scope_zip
@@ -593,6 +662,26 @@ def main():
             age_note = f" younger than {args.max_listing_age_days}d" if args.max_listing_age_days else ""
             print(f"Marked {n_removed} listing(s) in {scope_label}{age_note} as removed "
                   f"(not present across the {len(paths)} file(s) loaded this run).")
+        elif not args.no_auto_mark_removed:
+            plan, skip_reason = auto_mark_plan(paths)
+            if plan and not all_ids:
+                plan, skip_reason = None, "the fetch returned 0 listings"
+            if plan is None:
+                print(f"Auto mark-removed skipped: {skip_reason}.")
+            else:
+                n_removed = mark_removed_listings(
+                    conn, all_ids, scope_state=plan["state"], scope_state_only=True,
+                    max_age_days=plan["max_age_days"], property_types=plan["property_types"],
+                    age_reference_date=plan["age_reference_date"],
+                )
+                types_note = ", ".join(plan["property_types"]) if plan["property_types"] else "all types"
+                if plan["days_on_market"] is None:
+                    window_note = "full sweep, any listing age"
+                else:
+                    window_note = (f"listed within {plan['max_age_days']}d of {plan['age_reference_date']} "
+                                   f"(--days-on-market {plan['days_on_market']} minus 1-day margin)")
+                print(f"Auto-marked {n_removed} listing(s) in {plan['state']} as removed "
+                      f"[{types_note}; {window_note}].")
     finally:
         conn.close()
 

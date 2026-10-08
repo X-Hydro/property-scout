@@ -111,6 +111,7 @@ but its exact semantics on this endpoint are NOT yet verified in this
 project -- spot-check that returned listings' days-on-market / list date
 values are all <= N before trusting it (same lesson as the foreclosure
 filter: verify against known data before assuming a filter works).
+
 """
 
 import argparse
@@ -119,6 +120,7 @@ import json
 import os
 import sys
 import time
+from datetime import date
 
 import requests
 from pyproj import Geod
@@ -296,7 +298,9 @@ def dry_run_polygon(ring: list[list[float]], api_key: str, property_type: str | 
 
 def search_polygon(ring: list[list[float]], api_key: str, property_type: str | None,
                     part_label: str, foreclosure: bool = False,
-                    days_on_market: int | None = None) -> list[dict]:
+                    days_on_market: int | None = None) -> tuple[list[dict], bool]:
+    """Returns (results, capped) -- capped=True means the pagination cap
+    was hit and this part's results are incomplete."""
     headers = {"x-realtyapi-key": api_key}
     params = {
         "polygon": ring_to_polygon_param(ring),
@@ -340,7 +344,8 @@ def search_polygon(ring: list[list[float]], api_key: str, property_type: str | N
     # what we actually fetched against the LAST total the API reported
     # before it (suspiciously) dropped to 0 catches this instead of
     # reporting a false "Done".
-    if last_known_total is not None and len(part_results) < last_known_total:
+    capped = last_known_total is not None and len(part_results) < last_known_total
+    if capped:
         print(f"  WARNING [{part_label}]: fetched {len(part_results)} but the API last "
               f"reported total={last_known_total} before returning an empty/zero-total page "
               f"-- this looks like a pagination cap (commonly 10,000 results), NOT a genuine "
@@ -348,7 +353,7 @@ def search_polygon(ring: list[list[float]], api_key: str, property_type: str | N
               f"CONFIRMED failure mode notes for how to work around this (splitting the query "
               f"into smaller sub-searches) before trusting this part's output.")
 
-    return part_results
+    return part_results, capped
 
 
 def main():
@@ -442,12 +447,15 @@ def main():
     id_field: str | None = None
     id_field_decided = False
     seen_keys: set[str] = set()
+    capped_parts: list[str] = []
 
     for part_idx, ring in enumerate(rings):
         part_label = f"part {part_idx + 1}/{len(rings)}"
         try:
-            part_results = search_polygon(ring, api_key, args.property_type, part_label,
-                                          args.foreclosure, args.days_on_market)
+            part_results, capped = search_polygon(ring, api_key, args.property_type, part_label,
+                                                  args.foreclosure, args.days_on_market)
+            if capped:
+                capped_parts.append(part_label)
         except ScriptError as e:
             print(f"FAILED on {part_label}: {e}", file=sys.stderr)
             sys.exit(1)
@@ -483,6 +491,39 @@ def main():
         json.dump(all_results, f, indent=2)
 
     print(f"Done: {len(all_results)} unique listing(s) across {len(rings)} part(s) -> {out_path}")
+
+    incomplete_reasons = []
+    n_dropped = len(dropped_by_rank) + len(dropped_by_size)
+    if n_dropped:
+        incomplete_reasons.append(f"{n_dropped} polygon part(s) not searched")
+    if capped_parts:
+        incomplete_reasons.append(f"pagination cap hit on {', '.join(capped_parts)}")
+    if args.foreclosure:
+        incomplete_reasons.append("foreclosure-only filter (not full inventory)")
+
+    meta = {
+        "meta_version": 1,
+        "state": args.state.upper(),
+        "fetch_date": date.today().isoformat(),
+        "days_on_market": args.days_on_market,
+        "property_types": ([t.strip() for t in args.property_type.split(",") if t.strip()]
+                           if args.property_type else None),
+        "foreclosure_only": args.foreclosure,
+        "parts_total": len(all_rings),
+        "parts_searched": len(rings),
+        "listing_count": len(all_results),
+        "complete": not incomplete_reasons,
+        "incomplete_reasons": incomplete_reasons,
+    }
+    meta_path = out_path + ".meta"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
+    if incomplete_reasons:
+        print(f"Fetch INCOMPLETE ({'; '.join(incomplete_reasons)}) -- the loader will skip "
+              f"auto mark-removed for this file. Metadata -> {meta_path}")
+    else:
+        print(f"Fetch complete. Metadata -> {meta_path}")
 
 
 if __name__ == "__main__":
