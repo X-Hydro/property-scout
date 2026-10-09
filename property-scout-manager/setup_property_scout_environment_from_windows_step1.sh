@@ -13,7 +13,7 @@ REMOTE_IMAGE_PATH="$REMOTE_HOME/docker/images"
 REMOTE_DOCKER_PROPERTY_SCOUT_PATH="$REMOTE_HOME/docker/property-scout"
 REMOTE_IMAGE_PATH="$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/images"
 
-LOCAL_DATA_DIR="c:/data/property-scout"
+LOCAL_DATA_DIR="d:/property-scout-db_backup"
 REMOTE_DATA_DIR="/data/property-scout"
 
 ZIP_EXE="/c/Program Files/7-Zip/7z.exe"
@@ -35,29 +35,26 @@ ssh -i $SSH_KEY oncoordadmin@$HOST "mkdir -p" $REMOTE_DOCKER_PROPERTY_SCOUT_PATH
 scp -i $SSH_KEY $LOCAL_POSTGRES_PATH/docker-compose.yml.cloud oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-postgres/docker-compose.yml
 scp -i $SSH_KEY $LOCAL_POSTGRES_PATH/.env_cloud oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-postgres/.env
 
-
-
-exit
+#exit
 
 #################### Set up the manager ####################
 #files/setup required for property-scout manager
 ssh -i $SSH_KEY oncoordadmin@$HOST "mkdir -p $REMOTE_DOCKER_PROPERTY_SCOUT_PATH/images"
-scp -i $SSH_KEY ./docker-compose.yml.cloud oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/docker-compose.yml
-scp -i $SSH_KEY ./src/main/resources/application.properties oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH
-#scp -i $SSH_KEY ./.env_cloud_test oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/.env
-scp -i $SSH_KEY ./.env_cloud_prod oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/.env
+scp -i $SSH_KEY ./docker-compose.cloud.yml oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-manager/docker-compose.yml
+scp -i $SSH_KEY ./src/main/resources/application.properties oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-manager
+scp -i $SSH_KEY ./.env_cloud oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-manager/.env
 
-scp -i $SSH_KEY setup_property_scout_environment_from_ubuntu_step2.sh oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH
+scp -i $SSH_KEY setup_property_scout_environment_from_ubuntu_step2.sh oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-manager/
 
 #exit
 
 
-REMOTE_FILE="$REMOTE_DATA_DIR/auctionscout-manage.db"
+REMOTE_FILE="$REMOTE_DATA_DIR/property-scout-current.dump"
 REMOTE_SIZE=$(ssh -i "$SSH_KEY" oncoordadmin@"$HOST" "stat -c%s '$REMOTE_FILE' 2>/dev/null || echo 0")
 if [ "$REMOTE_SIZE" -gt 0 ]; then
   echo "Remote file exists and is non-zero ($REMOTE_SIZE bytes) — skipping copy."
 else
-  scp -i "$SSH_KEY" "$LOCAL_DATA_DIR/auctionscout-manage.db" oncoordadmin@"$HOST:$REMOTE_DATA_DIR"
+  scp -i "$SSH_KEY" "$LOCAL_DATA_DIR/property-scout-current.dump" oncoordadmin@"$HOST:$REMOTE_DATA_DIR"
 fi
 
 #exit

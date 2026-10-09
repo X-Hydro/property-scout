@@ -2,7 +2,7 @@ services:
   property-scout-manager:
     image: property-scout-manager:latest
     container_name: property-scout-manager
-    env_file: .env_local
+    env_file: .env
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://host.docker.internal:5432/${DB_NAME}
       SPRING_DATASOURCE_USERNAME: ${DB_USER}
