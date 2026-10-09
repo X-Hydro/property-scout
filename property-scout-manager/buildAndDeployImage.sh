@@ -33,7 +33,7 @@ docker save -o "$TAR_DIR/$IMAGE.tar" "$IMAGE:latest"
 if [[ "$1" == "--run" ]]; then
   echo "🚀 Starting $IMAGE locally..."
   docker compose -f docker-compose.local.yml down
-  docker compose -f docker-compose.local.yml up -d
+  docker compose --env-file .env_local -f docker-compose.local.yml up -d
   docker compose -f docker-compose.local.yml logs -f
 fi
 
