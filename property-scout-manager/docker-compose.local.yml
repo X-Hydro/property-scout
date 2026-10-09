@@ -1,0 +1,19 @@
+services:
+  property-scout-manager:
+    image: property-scout-manager:latest
+    container_name: property-scout-manager
+    env_file: .env_local
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://host.docker.internal:5432/${DB_NAME}
+      SPRING_DATASOURCE_USERNAME: ${DB_USER}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD}
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: 587
+      SMTP_USERNAME: support@oncoord.com
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      RECAPTCHA_SECRET_KEY: ${RECAPTCHA_SECRET_KEY}
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75
+    ports:
+      - "127.0.0.1:8061:8061"
+    mem_limit: 768m
+    restart: "no"
