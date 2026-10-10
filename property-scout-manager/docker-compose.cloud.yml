@@ -4,9 +4,6 @@ services:
     container_name: property-scout-manager
     env_file: .env
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://host.docker.internal:5432/${DB_NAME}
-      SPRING_DATASOURCE_USERNAME: ${DB_USER}
-      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD}
       SMTP_HOST: smtp.gmail.com
       SMTP_PORT: 587
       SMTP_USERNAME: support@oncoord.com
@@ -16,4 +13,16 @@ services:
     ports:
       - "127.0.0.1:${PSCOUT_PORT}:${PSCOUT_PORT}"
     mem_limit: 768m
-    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - pgnet
+    restart: unless-stopped
+
+networks:
+  pgnet:
+    external: true
+    name: property-scout-postgres_default

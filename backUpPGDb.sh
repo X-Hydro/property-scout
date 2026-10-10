@@ -18,8 +18,11 @@ docker exec oncoord-postgres pg_dump \
 docker exec -i oncoord-postgres pg_restore \
   -U oncoord -d oncoord-db \
   --no-owner --no-privileges \
-  --clean --if-exists \
+  --clean --if-exists --verbose \
   < /data/property-scout/property-scout-2026-10-06.dump
+  
+docker exec -it oncoord-postgres   psql -U oncoord -d oncoord-db   -c "SELECT current_database() AS database_name, relname AS table_name, n_live_tup AS estimated_rows FROM pg_stat_user_tables where relname in ('property_values','listings','gap_results') ORDER BY relname;"
+
   
 #docker exec oncoord-postgres vacuumdb -U oncoord -d oncoord-db --analyze-only --verbose 
   
