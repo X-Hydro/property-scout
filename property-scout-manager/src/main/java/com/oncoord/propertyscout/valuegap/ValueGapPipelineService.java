@@ -41,6 +41,9 @@ public class ValueGapPipelineService {
      * resolve to a parcel at all, OR if it resolves to one that fails the
      * implausible-size sanity check (see NearbyCompsService.resolveTargetParcel).
      * Neither case falls back to address matching -- see that method's docs.
+     * Also empty if the parcel's assessed value is 0 or negative: a gap
+     * against $0 is the full list price and gap_pct divides by zero (stored
+     * as Infinity, which broke GET /rank -- "Bad value for type BigDecimal").
      */
     public Optional<GapResult> computeForListing(Listing listing) {
         if (listing.getLatitude() == null || listing.getLongitude() == null) {
@@ -50,6 +53,11 @@ public class ValueGapPipelineService {
         Optional<TargetParcel> target = nearbyCompsService.resolveTargetParcel(
                 listing.getLatitude(), listing.getLongitude(), listing.getLotSize());
         if (target.isEmpty()) {
+            return Optional.empty();
+        }
+
+        Number assessed = target.get().getAssessedValue();
+        if (assessed != null && assessed.doubleValue() <= 0) {
             return Optional.empty();
         }
 

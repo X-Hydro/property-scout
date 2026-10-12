@@ -33,7 +33,7 @@ ssh -i $SSH_KEY oncoordadmin@$HOST "mkdir -p" $REMOTE_DOCKER_PROPERTY_SCOUT_PATH
 #################### Set up the postgres ####################
 
 scp -i $SSH_KEY $LOCAL_POSTGRES_PATH/docker-compose.yml.cloud oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-postgres/docker-compose.yml
-scp -i $SSH_KEY $LOCAL_POSTGRES_PATH/.env_cloud oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-postgres/.env
+scp -i $SSH_KEY $LOCAL_POSTGRES_PATH/.env_property_scout_cloud oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-postgres/.env
 
 #exit
 
