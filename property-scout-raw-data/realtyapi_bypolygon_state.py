@@ -103,6 +103,7 @@ Usage:
     python realtyapi_bypolygon_state.py CA --property-type single_family,land --out ca_listings.json
     python realtyapi_bypolygon_state.py HI --max-parts 8   # override the default cap for a state you know needs it
     python realtyapi_bypolygon_state.py VT --days-on-market 3   # only listings on the market <= 3 days
+    python realtyapi_bypolygon_state.py RI --use-listed-date --dsn "postgresql://..."   # window derived from DB
 
 --days-on-market N (alias --daysOnMarket) adds daysOnMarketMax=N to every
 request. Omitted by default, so a plain run still fetches everything.
@@ -111,6 +112,25 @@ but its exact semantics on this endpoint are NOT yet verified in this
 project -- spot-check that returned listings' days-on-market / list date
 values are all <= N before trusting it (same lesson as the foreclosure
 filter: verify against known data before assuming a filter works).
+
+--use-listed-date (requires --dsn, mutually exclusive with --days-on-market)
+derives N for daysOnMarketMax from what's already loaded instead of a fixed
+number. It finds the distinct listed_date values for this state's
+RealtyAPI-Realtor rows (ignoring future-dated ones), takes the SECOND most
+recent (LISTED_DATE_RANK), and sets
+    N = (today - that date) + LISTED_DATE_MARGIN_DAYS
+Second-most-recent rather than most-recent on purpose: the newest date is
+often thin (e.g. 2 rows vs 45 the day before) because the previous run
+happened mid-day or died partway through, so anchoring on it risks a gap.
+Over-fetching a day is cheap; missing listings is not. The 1-day margin
+covers daysOnMarketMax's unverified boundary (< vs <=, UTC vs local).
+The derived N is written into the .meta sidecar's days_on_market exactly
+like a manual --days-on-market, so the loader's auto mark-removed window
+stays consistent with what was actually fetched.
+KNOWN LIMIT (same as fixed --days-on-market): a listing whose list_date is
+OLDER than the anchor but which first appears in the API after the last run
+(late MLS syndication) is outside both windows -- the periodic full-state
+sweep is still what catches those.
 
 """
 
@@ -141,6 +161,12 @@ MIN_PART_AREA_KM2_DEFAULT = 10.0  # currently a no-op on this file -- see module
 SEARCH_TYPE = "For_Sale"
 SORT_ORDER = "Recommended"
 RESULT_COUNT = 200
+
+# --use-listed-date tuning -- see module docstring. Constants, not flags,
+# per the convention above.
+LISTED_DATE_RANK = 2          # 1 = most recent distinct listed_date, 2 = second most recent
+LISTED_DATE_MARGIN_DAYS = 1   # extra day on top of (today - anchor date)
+LISTED_DATE_SOURCE = "RealtyAPI-Realtor"  # must match load_listings_realtyapi.py's `source`
 
 _GEOD = Geod(ellps="WGS84")
 
@@ -356,6 +382,46 @@ def search_polygon(ring: list[list[float]], api_key: str, property_type: str | N
     return part_results, capped
 
 
+def days_from_listed_date(dsn: str, state_code: str) -> tuple[int, date, list[tuple[date, int]]]:
+    """Returns (days_on_market, anchor_date, recent_dates) for
+    --use-listed-date. recent_dates is [(listed_date, count), ...] newest
+    first, returned so main() can print what the decision was based on.
+    Raises ScriptError if the state has no usable rows (first run for a
+    state -- do a full sweep or a manual --days-on-market instead)."""
+    import psycopg2  # lazy: only this mode needs a DB connection
+
+    query = """
+        SELECT listed_date, count(*)
+        FROM listings
+        WHERE state = %s
+          AND source = %s
+          AND listed_date IS NOT NULL
+          AND listed_date <= CURRENT_DATE
+        GROUP BY listed_date
+        ORDER BY listed_date DESC
+        LIMIT %s
+    """
+    conn = psycopg2.connect(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, (state_code.upper(), LISTED_DATE_SOURCE, LISTED_DATE_RANK))
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        raise ScriptError(f"no {LISTED_DATE_SOURCE} listings with a listed_date found for "
+                          f"{state_code.upper()} -- run a full sweep (or a manual "
+                          f"--days-on-market) first")
+
+    # str()[:10] handles a DATE column (datetime.date) or an ISO text column alike
+    recent = [(date.fromisoformat(str(d)[:10]), n) for d, n in rows]
+    # Fewer distinct dates than LISTED_DATE_RANK -> fall back to the oldest one we have
+    anchor = recent[-1][0]
+    days = (date.today() - anchor).days + LISTED_DATE_MARGIN_DAYS
+    return max(days, 1), anchor, recent
+
+
 def main():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -382,6 +448,13 @@ def main():
                          help="only return listings on the market N days or fewer (adds "
                               "daysOnMarketMax=N to every request), e.g. --days-on-market 3. "
                               "Default: omitted entirely, so all listings are fetched")
+    parser.add_argument("--use-listed-date", action="store_true",
+                         help=f"derive --days-on-market from the listings table instead: "
+                              f"(today - {LISTED_DATE_RANK}nd most recent listed_date for this "
+                              f"state) + {LISTED_DATE_MARGIN_DAYS} day margin. Requires --dsn; "
+                              f"cannot be combined with --days-on-market. See module docstring")
+    parser.add_argument("--dsn", default=None,
+                         help="Postgres DSN, only used by --use-listed-date")
     parser.add_argument("--max-parts", type=int, default=MAX_PARTS_DEFAULT,
                          help=f"max polygon parts to search per state, largest-area first "
                               f"(default {MAX_PARTS_DEFAULT}) -- see module docstring for the "
@@ -395,6 +468,23 @@ def main():
                               "requests total) to report total listings and total pages "
                               "needed, then exit -- does not write an output file")
     args = parser.parse_args()
+
+    listed_date_anchor = None
+    if args.use_listed_date:
+        if args.days_on_market is not None:
+            parser.error("--use-listed-date and --days-on-market are mutually exclusive")
+        if not args.dsn:
+            parser.error("--use-listed-date requires --dsn")
+        try:
+            derived, listed_date_anchor, recent = days_from_listed_date(args.dsn, args.state)
+        except ScriptError as e:
+            print(f"FAILED: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Most recent listed_date(s) in DB for {args.state.upper()}: "
+              + ", ".join(f"{d.isoformat()} ({n})" for d, n in recent))
+        print(f"  anchor {listed_date_anchor.isoformat()} -> --days-on-market {derived} "
+              f"({(date.today() - listed_date_anchor).days}d + {LISTED_DATE_MARGIN_DAYS}d margin)")
+        args.days_on_market = derived
 
     if args.days_on_market is not None and args.days_on_market < 1:
         parser.error("--days-on-market must be a positive whole number (>= 1)")
@@ -480,7 +570,7 @@ def main():
             all_results.append(result)
 
     suffix = "_foreclosures" if args.foreclosure else ""
-    if args.days_on_market is not None:
+    if args.days_on_market is not None and not args.use_listed_date:
         # keeps a partial "recent listings" pull from overwriting a full pull
         suffix += f"_last{args.days_on_market}d"
     out_path = args.out or f"realtyapi_{args.state.lower()}{suffix}.json"
@@ -506,6 +596,9 @@ def main():
         "state": args.state.upper(),
         "fetch_date": date.today().isoformat(),
         "days_on_market": args.days_on_market,
+        "days_on_market_source": ("listed_date" if args.use_listed_date
+                                  else "manual" if args.days_on_market is not None else None),
+        "listed_date_anchor": listed_date_anchor.isoformat() if listed_date_anchor else None,
         "property_types": ([t.strip() for t in args.property_type.split(",") if t.strip()]
                            if args.property_type else None),
         "foreclosure_only": args.foreclosure,
