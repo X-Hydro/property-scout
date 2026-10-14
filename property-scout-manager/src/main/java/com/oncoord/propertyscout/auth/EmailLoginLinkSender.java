@@ -9,13 +9,6 @@ import org.springframework.stereotype.Component;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
-/**
- * PropertyScout's sign-in email. Because this bean exists,
- * oncoord-accounts auto-configures AuthService.
- *
- * The link lands on post-login.html, which POSTs the token to
- * /api/auth/verify and stores the returned session token.
- */
 @Component
 public class EmailLoginLinkSender implements LoginLinkSender {
 
