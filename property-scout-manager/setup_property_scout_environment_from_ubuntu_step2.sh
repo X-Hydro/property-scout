@@ -7,6 +7,28 @@ USER_HOME="/home/oncoordadmin"
 DOCKER_DIR="$USER_HOME/docker/property-scout"
 MANAGER_DIR="$USER_HOME/docker/property-scout/property-scout-manager"
 IMG_DIR="$DOCKER_DIR/images"
+PG_DIR="$DOCKER_DIR/property-scout-postgres"
+
+
+#Start postgres
+echo "Starting postgres"
+cd "$PG_DIR"
+docker image prune -f
+docker-compose up -d
+echo "Waiting for postgres to accept connections..."
+for i in {1..30}; do
+  if docker exec oncoord-postgres pg_isready -h 127.0.0.1 -U oncoord -q; then
+    echo "✅ Postgres is ready"
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    echo "❌ Postgres not ready after 60s"
+    docker logs --tail=50 oncoord-postgres
+    exit 1
+  fi
+  sleep 2
+done
+
 
 # Confirm the image tar exists before touching the running service
 if [ ! -f "$IMG_DIR/property-scout-manager.tar" ]; then
@@ -40,3 +62,7 @@ docker-compose logs --tail=50 property-scout-manager
 echo "----- property-scout-manager: container status -----"
 docker-compose ps property-scout-manager
 curl -i http://127.0.0.1:8061/health
+
+echo "setup_property_scout_environment_from_ubuntu_step2.sh complete."
+echo "Run restore_property_scout_tables_from_ubuntu_step3.sh next."
+ 

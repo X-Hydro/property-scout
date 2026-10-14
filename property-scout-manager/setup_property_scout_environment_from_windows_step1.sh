@@ -44,16 +44,18 @@ scp -i $SSH_KEY ./docker-compose.cloud.yml oncoordadmin@$HOST:$REMOTE_DOCKER_PRO
 scp -i $SSH_KEY ./src/main/resources/application.properties oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-manager
 scp -i $SSH_KEY ./.env_cloud oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-manager/.env
 
-scp -i $SSH_KEY setup_property_scout_environment_from_ubuntu_step2.sh oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-manager/
+scp -i $SSH_KEY setup_property_scout_environment_from_ubuntu_step2.sh oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH
+scp -i $SSH_KEY restore_property_scout_tables_from_ubuntu_step3.sh oncoordadmin@$HOST:$REMOTE_DOCKER_PROPERTY_SCOUT_PATH
 
 #exit
 
-
+LOCAL_SIZE=$(stat -c%s "$LOCAL_DATA_DIR/property-scout-current.dump")
 REMOTE_FILE="$REMOTE_DATA_DIR/property-scout-current.dump"
 REMOTE_SIZE=$(ssh -i "$SSH_KEY" oncoordadmin@"$HOST" "stat -c%s '$REMOTE_FILE' 2>/dev/null || echo 0")
-if [ "$REMOTE_SIZE" -gt 0 ]; then
-  echo "Remote file exists and is non-zero ($REMOTE_SIZE bytes) — skipping copy."
+if [ "$LOCAL_SIZE" == "$REMOTE_SIZE" ]; then
+  echo "Remote file has the same size as remote file ($REMOTE_SIZE bytes) — skipping copy."
 else
+  echo "Copying $LOCAL_DATA_DIR/property-scout-current.dump file.  Bytes: $LOCAL_SIZE"
   scp -i "$SSH_KEY" "$LOCAL_DATA_DIR/property-scout-current.dump" oncoordadmin@"$HOST:$REMOTE_DATA_DIR"
 fi
 

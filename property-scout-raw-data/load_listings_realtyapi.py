@@ -220,6 +220,36 @@ def _to_int(val):
         return None
 
 
+# Listings with no list price, or a placeholder one below this floor, are
+# bad data and are skipped at load. CONFIRMED real case (2026-10): a
+# NULL-price MA listing reached gap_results with price coerced to 0,
+# producing gap_pct = Infinity and breaking /value-gap/rank with "Bad value
+# for type BigDecimal : Infinity". The NULL-price rows seen were mostly
+# NJ/MD new-construction plan listings repeated under one community address.
+MIN_LISTING_PRICE = 1000
+
+
+def _has_valid_price(row: dict) -> bool:
+    price = _to_float(row.get("price"))
+    return price is not None and price >= MIN_LISTING_PRICE
+
+
+def filter_priced_listings(listings: list[dict], label: str) -> tuple[list[dict], list[dict]]:
+    """Splits mapped rows into (loadable, skipped) by MIN_LISTING_PRICE.
+
+    Skipped rows are NOT upserted, but callers should still count their
+    listing_ids as "seen" for --mark-removed: the listing is genuinely
+    present in the feed, just unpriced, and marking it Inactive would record
+    a removed_date for a listing that was never actually removed."""
+    loadable, skipped = [], []
+    for row in listings:
+        (loadable if _has_valid_price(row) else skipped).append(row)
+    if skipped:
+        print(f"  {label}: skipped {len(skipped)}/{len(listings)} listing(s) with missing or "
+              f"sub-${MIN_LISTING_PRICE:,} price")
+    return loadable, skipped
+
+
 def _extract_records(payload) -> list[dict]:
     if isinstance(payload, list):
         return payload
@@ -602,7 +632,8 @@ def main():
         if not args.api_key or not args.dsn:
             print("ERROR: --fetch-zip requires both --api-key and --dsn.")
             sys.exit(1)
-        listings = fetch_search_byzip(args.fetch_zip, args.api_key)
+        fetched = fetch_search_byzip(args.fetch_zip, args.api_key)
+        listings, _skipped = filter_priced_listings(fetched, f"zip {args.fetch_zip}")
         import psycopg2
         conn = psycopg2.connect(args.dsn)
         try:
@@ -610,7 +641,8 @@ def main():
             n = upsert_listings(conn, listings)
             print(f"Done. {n} listings upserted for zip {args.fetch_zip}.")
             if args.mark_removed:
-                ids = [l["listing_id"] for l in listings if l.get("listing_id")]
+                # All fetched ids, including price-skipped ones -- see filter_priced_listings().
+                ids = [l["listing_id"] for l in fetched if l.get("listing_id")]
                 n_removed = mark_removed_listings(conn, ids, scope_zip=args.fetch_zip,
                                                    max_age_days=args.max_listing_age_days,
                                                    property_types=manual_property_types)
@@ -637,14 +669,19 @@ def main():
     try:
         _check_schema_exists(conn)
         total = 0
+        total_skipped = 0
         all_ids = []  # full set across every file THIS run -- required for correct --mark-removed
         for path in paths:
-            listings = parse_listings_file(path)
+            parsed = parse_listings_file(path)
+            listings, skipped = filter_priced_listings(parsed, path)
             n = upsert_listings(conn, listings)
             print(f"  {path}: upserted {n} listings")
             total += n
-            all_ids.extend(l["listing_id"] for l in listings if l.get("listing_id"))
-        print(f"\nDone. {total} total listings upserted across {len(paths)} file(s).")
+            total_skipped += len(skipped)
+            # All parsed ids, including price-skipped ones -- see filter_priced_listings().
+            all_ids.extend(l["listing_id"] for l in parsed if l.get("listing_id"))
+        skipped_note = f" ({total_skipped} skipped for missing/sub-${MIN_LISTING_PRICE:,} price)" if total_skipped else ""
+        print(f"\nDone. {total} total listings upserted across {len(paths)} file(s){skipped_note}.")
 
         if args.mark_removed:
             n_removed = mark_removed_listings(
