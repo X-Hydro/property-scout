@@ -29,7 +29,10 @@ public class EmailLoginLinkSender implements LoginLinkSender {
 
     @Override
     public void send(String email, String loginToken) {
-        String link = appBaseUrl + "/post-login.html?token="
+        // Fragment (#), not query string (?): the browser never sends the
+        // fragment to any server, so the token stays out of access logs and
+        // Referer headers. Same approach as AuctionScout's links.
+        String link = appBaseUrl + "/post-login.html#token="
                 + URLEncoder.encode(loginToken, StandardCharsets.UTF_8);
 
         SimpleMailMessage message = new SimpleMailMessage();
