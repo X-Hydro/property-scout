@@ -15,6 +15,8 @@ REMOTE_IMAGE_PATH="$REMOTE_DOCKER_PROPERTY_SCOUT_PATH/images"
 
 LOCAL_DATA_DIR="d:/property-scout-db_backup"
 REMOTE_DATA_DIR="/data/property-scout"
+REMOTE_ACCOUNTS_DIR="/data/oncoord-db"
+
 
 ZIP_EXE="/c/Program Files/7-Zip/7z.exe"
 
@@ -29,6 +31,8 @@ REMOTE_USER_HOST="$USER@$HOST"
 
 ssh -i $SSH_KEY oncoordadmin@$HOST "mkdir -p" $REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-manager
 ssh -i $SSH_KEY oncoordadmin@$HOST "mkdir -p" $REMOTE_DOCKER_PROPERTY_SCOUT_PATH/property-scout-postgres
+ssh -i $SSH_KEY oncoordadmin@$HOST "mkdir -p" $REMOTE_ACCOUNTS_DIR
+
 
 #################### Set up the postgres ####################
 
@@ -59,7 +63,18 @@ else
   scp -i "$SSH_KEY" "$LOCAL_DATA_DIR/property-scout-current.dump" oncoordadmin@"$HOST:$REMOTE_DATA_DIR"
 fi
 
-#exit
+LOCAL_SIZE=$(stat -c%s "$LOCAL_DATA_DIR/oncoord-db-accounts-current.dump")
+REMOTE_FILE="$REMOTE_ACCOUNTS_DIR/oncoord-db-accounts-current.dump"
+REMOTE_SIZE=$(ssh -i "$SSH_KEY" oncoordadmin@"$HOST" "stat -c%s '$REMOTE_FILE' 2>/dev/null || echo 0")
+if [ "$REMOTE_SIZE" -gt 0 ]; then
+  echo "Remote file exists: 'oncoord-db-accounts-current.dump' and has size ($REMOTE_SIZE bytes) — skipping copy."
+else
+  echo "Copying $LOCAL_DATA_DIR/oncoord-db-accounts-current.dump.  Bytes: $LOCAL_SIZE"
+  scp -i "$SSH_KEY" "$LOCAL_DATA_DIR/oncoord-db-accounts-current.dump" oncoordadmin@"$HOST:$REMOTE_ACCOUNTS_DIR"
+fi
+
+
+exit
 
 declare -A FILES
 # List of image files to transfer
