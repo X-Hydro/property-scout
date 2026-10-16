@@ -1,5 +1,6 @@
 package com.oncoord.propertyscout.auth;
 
+import com.oncoord.accounts.auth.AccountNotFoundException;
 import com.oncoord.accounts.auth.AuthService;
 import com.oncoord.auth.common.RecaptchaClient;
 import org.slf4j.Logger;
@@ -25,7 +26,8 @@ public class AuthController {
 
     private static final Logger log = LoggerFactory.getLogger(AuthController.class);
 
-    public record RegisterRequest(String email, String captcha) {}
+    /** username is sent only from register.html's "Create account" mode; null on "Sign in". */
+    public record RegisterRequest(String email, String username, String captcha) {}
     public record VerifyRequest(String token) {}
 
     private final AuthService auth;
@@ -36,14 +38,40 @@ public class AuthController {
         this.recaptcha = recaptcha;
     }
 
-    /** register.html: emails a sign-in link (creates the account if new). */
+    /**
+     * register.html posts here in both modes:
+     *
+     *   "Sign in" (no username)  existing accounts only. An unknown email gets
+     *                            a 404 with code "account_not_found", and the
+     *                            page switches to "Create account".
+     *   "Create account"         creates the account with its name if new; an
+     *                            existing account's name is never changed.
+     */
     @PostMapping("/register")
     public ResponseEntity<Map<String, String>> register(@RequestBody RegisterRequest request) {
         if (request == null || request.captcha() == null || !recaptcha.verify(request.captcha())) {
             return error(HttpStatus.BAD_REQUEST, "The CAPTCHA check failed. Complete it again, then resend.");
         }
+        boolean createAccount = request.username() != null;
+        String username = null;
+        if (createAccount) {
+            try {
+                username = AuthService.normalizeUsername(request.username());
+            } catch (IllegalArgumentException e) {
+                return error(HttpStatus.BAD_REQUEST,
+                        "Enter a name of up to " + AuthService.MAX_USERNAME_LENGTH + " characters.");
+            }
+        }
         try {
-            auth.requestLoginLink(request.email());
+            if (createAccount) {
+                auth.requestLoginLink(request.email(), username);
+            } else {
+                auth.requestSignInLink(request.email());
+            }
+        } catch (AccountNotFoundException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of(
+                    "code", "account_not_found",
+                    "error", "We don't have an account for that email yet. Add your name to create one."));
         } catch (IllegalArgumentException e) {
             return error(HttpStatus.BAD_REQUEST, "Enter a valid email address.");
         } catch (MailException e) {

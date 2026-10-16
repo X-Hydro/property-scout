@@ -29,6 +29,16 @@ public class EmailLoginLinkSender implements LoginLinkSender {
 
     @Override
     public void send(String email, String loginToken) {
+        send(email, null, loginToken);
+    }
+
+    /**
+     * Greets the user by name when the account has one. The name goes in the
+     * body only, never the subject, so it can't affect email headers. This is
+     * plain text, so no escaping is needed; an HTML version would have to escape it.
+     */
+    @Override
+    public void send(String email, String username, String loginToken) {
         // Fragment (#), not query string (?): the browser never sends the
         // fragment to any server, so the token stays out of access logs and
         // Referer headers. Same approach as AuctionScout's links.
@@ -39,7 +49,10 @@ public class EmailLoginLinkSender implements LoginLinkSender {
         message.setFrom(mailFrom);
         message.setTo(email);
         message.setSubject("Your PropertyScout sign-in link");
+        String greeting = (username == null || username.isBlank()) ? "Hello," : "Hello " + username + ",";
         message.setText("""
+                %s
+
                 Use this link to sign in to PropertyScout:
 
                 %s
@@ -48,7 +61,7 @@ public class EmailLoginLinkSender implements LoginLinkSender {
                 If you didn't ask to sign in, you can ignore this email.
 
                 PropertyScout is an OnCoord product.
-                """.formatted(link, linkTtlMinutes));
+                """.formatted(greeting, link, linkTtlMinutes));
         mailSender.send(message);
     }
 }
